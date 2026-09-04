@@ -1,0 +1,44 @@
+[
+  {
+    "as_of": "2026-08-15T12:00:00+08:00",
+    "display_value": "33.33%",
+    "formula": {
+      "content_hash": "sha256:2c164cbe330c93d71c76b85c9f92e686cba7b508ff1e0039b8836b42af4b5fc9",
+      "id": "operating_single_quarter_yoy",
+      "version": "1.0.0"
+    },
+    "key": {
+      "entity_id": "cn.company.test001",
+      "metric_id": "derived.cashflow.operating.single_quarter_yoy",
+      "period": "2026Q2",
+      "scope": "consolidated"
+    },
+    "knowledge_policy": "system",
+    "provenance": {
+      "calculation_id": "calc_9145b0ee914c4ce27b013d71",
+      "inputs": [
+        {"observation_id": "obs_current_h1_v1", "role": "current_h1", "source_record_id": "src_current_h1_v1", "transform": "identity"},
+        {"observation_id": "obs_current_q1", "role": "current_q1", "source_record_id": "src_current_q1", "transform": "subtract_from_current_h1"},
+        {"observation_id": "obs_prior_h1", "role": "prior_h1", "source_record_id": "src_prior_h1", "transform": "identity"},
+        {"observation_id": "obs_prior_q1", "role": "prior_q1", "source_record_id": "src_prior_q1", "transform": "subtract_from_prior_h1"}
+      ]
+    },
+    "result_id": "result_9145b0ee914c4ce27b013d71",
+    "semantics": {
+      "accounting_standard": "CAS",
+      "currency": null,
+      "period_basis": "discrete",
+      "unit": "1",
+      "value_kind": "ratio"
+    },
+    "snapshot_id": "snap_adc507956a69c5942c47a7bb",
+    "source_time_precision": "day",
+    "status": "ok",
+    "validation": {
+      "check_ids": ["pit", "same_scope", "same_currency", "same_unit", "nonzero_denominator"],
+      "status": "passed"
+    },
+    "value": "0.3333",
+    "warnings": []
+  }
+]

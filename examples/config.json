@@ -1,0 +1,4 @@
+{
+  "database": "./var/fin-harness.sqlite3",
+  "metric_registry": "./registry/metrics/operating_cashflow_q2_yoy.json"
+}

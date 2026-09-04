@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fin-harness.local/protocol/v1/request.schema.json",
+  "title": "Financial Harness v1 request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "operation", "request_id", "request"],
+  "properties": {
+    "protocol": {"const": "fin-harness/v1"},
+    "operation": {"enum": ["analyze", "explain"]},
+    "request_id": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "maxLength": 128},
+        {"type": "null"}
+      ]
+    },
+    "request": {"type": "object"},
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "client": {"type": "string", "minLength": 1, "maxLength": 64},
+        "correlation_id": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "analyze"}}},
+      "then": {"properties": {"request": {"$ref": "#/$defs/analyzeRequest"}}},
+      "else": {"properties": {"request": {"$ref": "#/$defs/explainRequest"}}}
+    }
+  ],
+  "$defs": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric_id", "period", "scope"],
+      "properties": {
+        "metric_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "period": {"type": "string", "pattern": "^[0-9]{4}Q[1-4]$"},
+        "scope": {"enum": ["consolidated", "parent"]}
+      }
+    },
+    "analyzeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity", "targets", "as_of", "knowledge_policy"],
+      "properties": {
+        "entity": {"type": "string", "minLength": 1, "maxLength": 128},
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/target"}
+        },
+        "as_of": {"type": "string", "format": "date-time"},
+        "knowledge_policy": {"enum": ["system", "public"]}
+      }
+    },
+    "explainRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "result_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      }
+    }
+  }
+}

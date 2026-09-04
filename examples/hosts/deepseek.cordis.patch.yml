@@ -1,0 +1,15 @@
+- insert:
+    - id: mcp-fin-harness
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: fin-harness
+        transport: stdio
+        command: /absolute/path/to/fin-harness/.venv/bin/fin-harness
+        args:
+          - mcp
+          - --config
+          - /absolute/path/to/fin-harness/examples/config.json
+        env: {}
+        cwd: /absolute/path/to/fin-harness
+        toolCallTimeoutMs: 60000
+        failOnStartupError: true

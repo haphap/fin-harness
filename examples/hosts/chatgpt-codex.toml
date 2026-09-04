@@ -1,0 +1,12 @@
+# Copy this table into ~/.codex/config.toml, or place it in a trusted
+# project's .codex/config.toml. Replace both absolute paths first.
+[mcp_servers.fin_harness]
+command = "/absolute/path/to/fin-harness/.venv/bin/fin-harness"
+args = ["mcp", "--config", "/absolute/path/to/fin-harness/examples/config.json"]
+cwd = "/absolute/path/to/fin-harness"
+enabled = true
+required = true
+enabled_tools = ["financial_analyze", "financial_explain"]
+startup_timeout_sec = 10
+tool_timeout_sec = 60
+default_tools_approval_mode = "auto"

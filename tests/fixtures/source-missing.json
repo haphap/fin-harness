@@ -1,0 +1,103 @@
+{
+  "fixture_version": "fin-harness/source-fixture/v1",
+  "license": {
+    "label": "synthetic-fixture",
+    "purposes": ["development", "test"],
+    "redistribution": true
+  },
+  "entities": [
+    {"entity_id": "cn.company.test001", "aliases": ["TEST001.CN"]}
+  ],
+  "records": [
+    {
+      "source_record_id": "src_current_h1_v1",
+      "provider": "synthetic-tushare",
+      "locator": {"endpoint": "cashflow", "row_key": "TEST001.CN:20260630:1:v1"},
+      "raw": {"ts_code": "TEST001.CN", "end_date": "20260630", "report_type": "1", "comp_type": "1", "end_type": "2", "is_calc": "0", "ann_date": "20260808", "f_ann_date": "20260808", "update_flag": "0", "n_cashflow_act": "130.000000"},
+      "observation": {
+        "observation_id": "obs_current_h1_v1",
+        "entity_id": "cn.company.test001",
+        "metric_id": "statement.cashflow.operating_net",
+        "period_start": "2026-01-01",
+        "period_end": "2026-06-30",
+        "period_label": "2026H1",
+        "basis": "ytd",
+        "scope": "consolidated",
+        "accounting_standard": "CAS",
+        "company_type": "industrial",
+        "reporting_variant": "reported",
+        "source_dimensions": {"report_type": "1", "comp_type": "1", "end_type": "2", "is_calc": "0"},
+        "value": "130.000000",
+        "unit": "CNY",
+        "currency": "CNY",
+        "source_ann_date": "2026-08-08",
+        "source_f_ann_date": "2026-08-08",
+        "source_time_precision": "day",
+        "published_at": "2026-08-09T00:00:00+08:00",
+        "ingested_at": "2026-08-09T08:00:00+08:00",
+        "supersedes_observation_id": null,
+        "record_status": "active"
+      }
+    },
+    {
+      "source_record_id": "src_prior_h1",
+      "provider": "synthetic-tushare",
+      "locator": {"endpoint": "cashflow", "row_key": "TEST001.CN:20250630:1"},
+      "raw": {"ts_code": "TEST001.CN", "end_date": "20250630", "report_type": "1", "comp_type": "1", "end_type": "2", "is_calc": "0", "ann_date": "20250809", "f_ann_date": "20250809", "update_flag": "0", "n_cashflow_act": "100.000000"},
+      "observation": {
+        "observation_id": "obs_prior_h1",
+        "entity_id": "cn.company.test001",
+        "metric_id": "statement.cashflow.operating_net",
+        "period_start": "2025-01-01",
+        "period_end": "2025-06-30",
+        "period_label": "2025H1",
+        "basis": "ytd",
+        "scope": "consolidated",
+        "accounting_standard": "CAS",
+        "company_type": "industrial",
+        "reporting_variant": "reported",
+        "source_dimensions": {"report_type": "1", "comp_type": "1", "end_type": "2", "is_calc": "0"},
+        "value": "100.000000",
+        "unit": "CNY",
+        "currency": "CNY",
+        "source_ann_date": "2025-08-09",
+        "source_f_ann_date": "2025-08-09",
+        "source_time_precision": "day",
+        "published_at": "2025-08-10T00:00:00+08:00",
+        "ingested_at": "2025-08-10T08:00:00+08:00",
+        "supersedes_observation_id": null,
+        "record_status": "active"
+      }
+    },
+    {
+      "source_record_id": "src_prior_q1",
+      "provider": "synthetic-tushare",
+      "locator": {"endpoint": "cashflow", "row_key": "TEST001.CN:20250331:1"},
+      "raw": {"ts_code": "TEST001.CN", "end_date": "20250331", "report_type": "1", "comp_type": "1", "end_type": "1", "is_calc": "0", "ann_date": "20250429", "f_ann_date": "20250429", "update_flag": "0", "n_cashflow_act": "40.000000"},
+      "observation": {
+        "observation_id": "obs_prior_q1",
+        "entity_id": "cn.company.test001",
+        "metric_id": "statement.cashflow.operating_net",
+        "period_start": "2025-01-01",
+        "period_end": "2025-03-31",
+        "period_label": "2025Q1",
+        "basis": "ytd",
+        "scope": "consolidated",
+        "accounting_standard": "CAS",
+        "company_type": "industrial",
+        "reporting_variant": "reported",
+        "source_dimensions": {"report_type": "1", "comp_type": "1", "end_type": "1", "is_calc": "0"},
+        "value": "40.000000",
+        "unit": "CNY",
+        "currency": "CNY",
+        "source_ann_date": "2025-04-29",
+        "source_f_ann_date": "2025-04-29",
+        "source_time_precision": "day",
+        "published_at": "2025-04-30T00:00:00+08:00",
+        "ingested_at": "2025-04-30T08:00:00+08:00",
+        "supersedes_observation_id": null,
+        "record_status": "active"
+      }
+    }
+  ]
+}

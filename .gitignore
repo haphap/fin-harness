@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+.venv/
+dist/
+build/
+*.egg-info/
+.agents/
+.codex/
+task_plan.md
+findings.md
+progress.md

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fin-harness.local/protocol/v1/explain-response.schema.json",
+  "title": "Financial Harness v1 explain response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "request_id", "status", "results"],
+  "properties": {
+    "protocol": {"const": "fin-harness/v1"},
+    "request_id": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+    "run_id": {"type": "string"},
+    "status": {"enum": ["ok", "error"]},
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["result_id", "formula", "inputs", "steps", "validation"],
+        "properties": {
+          "result_id": {"type": "string"},
+          "formula": {"type": "object"},
+          "inputs": {"type": "array", "items": {"type": "object"}},
+          "steps": {"type": "array", "items": {"type": "object"}},
+          "validation": {"type": "object"}
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"enum": ["permission_denied", "snapshot_not_found", "replay_artifact_mismatch", "invalid_request", "system_error"]},
+        "message": {"type": "string", "maxLength": 512}
+      }
+    }
+  }
+}

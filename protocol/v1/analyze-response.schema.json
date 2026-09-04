@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fin-harness.local/protocol/v1/analyze-response.schema.json",
+  "title": "Financial Harness v1 analyze response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "request_id", "status", "results"],
+  "properties": {
+    "protocol": {"const": "fin-harness/v1"},
+    "request_id": {
+      "oneOf": [{"type": "string"}, {"type": "null"}]
+    },
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["ok", "partial", "rejected", "error"]},
+    "results": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/result"}
+    },
+    "error": {"$ref": "#/$defs/error"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "error"}}},
+      "then": {"required": ["error"], "properties": {"results": {"maxItems": 0}}},
+      "else": {"required": ["run_id"]}
+    }
+  ],
+  "$defs": {
+    "decimal": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "inputProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "observation_id", "source_record_id", "transform"],
+      "properties": {
+        "role": {"enum": ["current_h1", "current_q1", "prior_h1", "prior_q1"]},
+        "observation_id": {"type": "string"},
+        "source_record_id": {"type": "string"},
+        "transform": {"type": "string"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result_id", "status", "key", "as_of", "knowledge_policy", "warnings"],
+      "properties": {
+        "result_id": {"type": "string"},
+        "status": {
+          "enum": [
+            "ok",
+            "insufficient_data",
+            "ambiguous_entity",
+            "ambiguous_metric",
+            "ambiguous_source_version",
+            "unsupported_metric",
+            "not_applicable",
+            "validation_failed",
+            "source_error",
+            "system_error"
+          ]
+        },
+        "key": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["entity_id", "metric_id", "period", "scope"],
+          "properties": {
+            "entity_id": {"type": "string"},
+            "metric_id": {"type": "string"},
+            "period": {"type": "string"},
+            "scope": {"type": "string"}
+          }
+        },
+        "value": {"$ref": "#/$defs/decimal"},
+        "display_value": {"type": "string"},
+        "semantics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["value_kind", "unit", "currency", "period_basis", "accounting_standard"],
+          "properties": {
+            "value_kind": {"type": "string"},
+            "unit": {"type": "string"},
+            "currency": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            "period_basis": {"type": "string"},
+            "accounting_standard": {"type": "string"}
+          }
+        },
+        "as_of": {"type": "string", "format": "date-time"},
+        "knowledge_policy": {"enum": ["system", "public"]},
+        "source_time_precision": {"enum": ["instant", "day", "mixed"]},
+        "formula": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "content_hash"],
+          "properties": {
+            "id": {"type": "string"},
+            "version": {"type": "string"},
+            "content_hash": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "snapshot_id": {"type": "string"},
+        "validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "check_ids"],
+          "properties": {
+            "status": {"enum": ["passed", "failed"]},
+            "check_ids": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["calculation_id", "inputs"],
+          "properties": {
+            "calculation_id": {"type": "string"},
+            "inputs": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {"$ref": "#/$defs/inputProvenance"}
+            }
+          }
+        },
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "ok"}}},
+          "then": {
+            "required": ["value", "display_value", "semantics", "source_time_precision", "formula", "snapshot_id", "validation", "provenance"]
+          },
+          "else": {"required": ["error"]}
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid_request",
+            "unsupported_protocol",
+            "permission_denied",
+            "rate_limited",
+            "timeout",
+            "cancelled",
+            "snapshot_not_found",
+            "replay_artifact_mismatch",
+            "source_unavailable",
+            "response_too_large",
+            "system_error",
+            "insufficient_data",
+            "ambiguous_entity",
+            "ambiguous_metric",
+            "ambiguous_source_version",
+            "unsupported_metric",
+            "not_applicable",
+            "validation_failed",
+            "source_error"
+          ]
+        },
+        "message": {"type": "string", "maxLength": 512}
+      }
+    }
+  }
+}

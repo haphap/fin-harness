@@ -1,0 +1,21 @@
+{
+  "protocol": "fin-harness/v1",
+  "operation": "analyze",
+  "request_id": "fixture-missing",
+  "request": {
+    "entity": "TEST001.CN",
+    "targets": [
+      {
+        "metric_id": "derived.cashflow.operating.single_quarter_yoy",
+        "period": "2026Q2",
+        "scope": "consolidated"
+      }
+    ],
+    "as_of": "2026-08-15T12:00:00+08:00",
+    "knowledge_policy": "system"
+  },
+  "context": {
+    "client": "contract-test",
+    "correlation_id": "missing-01"
+  }
+}

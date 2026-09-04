@@ -1,0 +1,26 @@
+{
+  "metric_id": "derived.cashflow.operating.single_quarter_yoy",
+  "version": "1.0.0",
+  "accounting_standard": "CAS",
+  "value_kind": "ratio",
+  "calendar": "CN_CALENDAR_YEAR",
+  "supported_target_periods": ["Q2"],
+  "inputs": [
+    {"name": "current_h1", "metric_id": "statement.cashflow.operating_net", "year_offset": 0, "period": "H1", "basis": "ytd"},
+    {"name": "current_q1", "metric_id": "statement.cashflow.operating_net", "year_offset": 0, "period": "Q1", "basis": "ytd"},
+    {"name": "prior_h1", "metric_id": "statement.cashflow.operating_net", "year_offset": -1, "period": "H1", "basis": "ytd"},
+    {"name": "prior_q1", "metric_id": "statement.cashflow.operating_net", "year_offset": -1, "period": "Q1", "basis": "ytd"}
+  ],
+  "calculation": "operating_single_quarter_yoy",
+  "formula": "current=(current_h1-current_q1); prior=(prior_h1-prior_q1); yoy=(current-prior)/abs(prior)",
+  "preconditions": [
+    {"check": "nonzero_difference", "refs": ["prior_h1", "prior_q1"]},
+    {"check": "same_scope", "refs": ["current_h1", "current_q1", "prior_h1", "prior_q1"]},
+    {"check": "same_currency", "refs": ["current_h1", "current_q1", "prior_h1", "prior_q1"]},
+    {"check": "same_unit", "refs": ["current_h1", "current_q1", "prior_h1", "prior_q1"]}
+  ],
+  "applicability": {"scopes": ["consolidated"]},
+  "missing_policy": "insufficient_data",
+  "decimal": {"precision": 34, "rounding": "ROUND_HALF_EVEN", "output_scale": 4},
+  "governance": "immutable"
+}
