@@ -92,7 +92,13 @@ uv run fin-harness import-tushare 600000.SH 20260630 \
 ```
 
 This command is intentionally operator-only. It never appears as an MCP tool.
-Multiple competing report versions remain ambiguous unless an explicit
+For the fixed Tushare cashflow projection, PIT-visible rows that differ only in
+`update_flag` may share a calculation input after every financial dimension,
+disclosure time and mapped value is verified equal. All raw rows remain stored;
+the snapshot pins their hashes, and explain lists `equivalent_sources`. No row is
+treated as a newer revision just because its update flag is `1`.
+
+Multiple genuinely competing report versions remain ambiguous unless an explicit
 `supersedes_observation_id` relationship is reviewed and imported. If both versions
 are already stored, use the operator-only command (never a model tool):
 
@@ -104,6 +110,10 @@ This appends an immutable review record; it never edits either observation.
 `system` applies the relationship only from the actual review time. `public`
 may use the reviewed relationship for already-disclosed versions; this is public
 history reconstruction, not a claim that the local system knew the relationship then.
+
+Explain also returns recorded rejections, including missing input roles or up to
+16 conflicting observation/source ID pairs. Its top-level `ok` means the
+explanation was retrieved, not that the underlying financial calculation passed.
 Reimporting the same raw row preserves its first ingestion time. Conflicting
 observation values or supersedes fields are rejected instead of silently ignored.
 

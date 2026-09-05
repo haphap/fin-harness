@@ -14,6 +14,7 @@ from .protocol import (METRIC_ID, PROTOCOL, ExecutionControl, ProtocolError, che
                        decimal_string, error_response, exception_response, normalize_timestamp,
                        require_decimal_string, sha256_json, validate_envelope)
 from .store import AmbiguousSourceVersion, Store
+from .tushare_source import cashflow_equivalence_key
 
 _ROLE_TRANSFORMS = {
     "current_h1": "identity",
@@ -166,7 +167,11 @@ class Engine:
                 else:
                     observations[role] = observation
         except AmbiguousSourceVersion as exc:
-            return self._rejected_result(target, {"as_of": request_as_of, "knowledge_policy": knowledge_policy}, "ambiguous_source_version", str(exc), entity_id), None
+            return self._rejected_result(target, {"as_of": request_as_of, "knowledge_policy": knowledge_policy},
+                "ambiguous_source_version", str(exc), entity_id, details=exc.details), None
+        except ValueError as exc:
+            return self._rejected_result(target, {"as_of": request_as_of, "knowledge_policy": knowledge_policy},
+                "validation_failed", str(exc), entity_id), None
         if missing:
             return self._rejected_result(
                 target,
@@ -174,6 +179,7 @@ class Engine:
                 "insufficient_data",
                 "missing required observations: " + ", ".join(missing),
                 entity_id,
+                details={"missing_roles": missing},
             ), None
 
         for role, item in observations.items():
@@ -204,20 +210,11 @@ class Engine:
         for role in ("current_h1", "current_q1", "prior_h1", "prior_q1"):
             item = observations[role]
             manifest_inputs.append(
-                {
-                    "role": role,
-                    "observation_id": item["observation_id"],
-                    "source_record_id": item["source_record_id"],
-                    "normalized_hash": item["normalized_hash"],
-                    "raw_hash": item["raw_hash"],
-                    "payload_hash": item["payload_hash"],
-                    "published_at": item["published_at"],
-                    "ingested_at": item["ingested_at"],
-                    "value": item["value_text"],
-                    "unit": item["unit"],
-                    "currency": item["currency"],
-                }
+                {"role": role, **_snapshot_input(item)}
             )
+            if item.get("equivalent_observations"):
+                manifest_inputs[-1]["equivalent_observations"] = [
+                    _snapshot_input(other) for other in item["equivalent_observations"]]
             provenance_inputs.append(
                 {
                     "role": role,
@@ -281,7 +278,8 @@ class Engine:
                 "calculation_id": "calc_" + result_id.removeprefix("result_"),
                 "inputs": provenance_inputs,
             },
-            "warnings": [],
+            "warnings": ["equivalent_source_records"] if any(
+                item.get("equivalent_observations") for item in observations.values()) else [],
         }
         return result, snapshot
 
@@ -292,6 +290,8 @@ class Engine:
         status: str,
         message: str,
         entity_id: str | None = None,
+        *,
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         key = {
             "entity_id": entity_id or target.get("entity", "unresolved"),
@@ -299,7 +299,7 @@ class Engine:
             "period": target["period"],
             "scope": target["scope"],
         }
-        return {
+        result = {
             "result_id": "result_" + sha256_json({"key": key, "status": status}).removeprefix("sha256:")[:24],
             "status": status,
             "key": key,
@@ -308,6 +308,9 @@ class Engine:
             "warnings": [],
             "error": {"code": status, "message": message[:512]},
         }
+        if details is not None:
+            result["error"]["details"] = details
+        return result
 
     def explain(self, envelope: dict[str, Any], tenant: str = "local") -> dict[str, Any]:
         control = self.control or ExecutionControl()
@@ -326,6 +329,7 @@ class Engine:
             if wanted and result["result_id"] not in wanted:
                 continue
             if result["status"] != "ok":
+                explanations.append(result)
                 continue
             snapshot = self.store.get_snapshot(result["snapshot_id"], tenant)
             if snapshot is None:
@@ -403,12 +407,12 @@ class Engine:
         values: dict[str, str] = {}
         inputs = []
         for saved in snapshot["manifest"]["inputs"]:
-            observation = self.store.get_observation(saved["observation_id"])
-            if observation is None or observation["normalized_hash"] != saved["normalized_hash"]:
-                raise ValueError("snapshot observation hash mismatch")
-            self.store.verify_observation(observation)
-            if observation["raw_hash"] != saved["raw_hash"] or observation["payload_hash"] != saved.get("payload_hash"):
-                raise ValueError("snapshot source hash mismatch")
+            observation = self._snapshot_observation(saved)
+            equivalents = [self._snapshot_observation(other) for other in saved.get("equivalent_observations", [])]
+            if equivalents:
+                key = cashflow_equivalence_key(observation)
+                if key is None or any(cashflow_equivalence_key(other) != key for other in equivalents):
+                    raise ValueError("snapshot source equivalence mismatch")
             values[saved["role"]] = observation["value_text"]
             inputs.append(
                 {
@@ -419,15 +423,35 @@ class Engine:
                     "currency": observation["currency"],
                     "published_at": observation["published_at"],
                     "ingested_at": observation["ingested_at"],
-                    "source": {
-                        "source_record_id": observation["source_record_id"],
-                        "locator": observation["locator"],
-                        "raw_hash": observation["raw_hash"],
-                        "license": observation["license"],
-                    },
+                    "source": _source_details(observation),
                 }
             )
+            if equivalents:
+                inputs[-1]["equivalent_sources"] = [
+                    {"observation_id": other["observation_id"], "published_at": other["published_at"],
+                     "ingested_at": other["ingested_at"], "source": _source_details(other)}
+                    for other in equivalents]
         return _calculate(values), inputs
+
+    def _snapshot_observation(self, saved: dict[str, Any]) -> dict[str, Any]:
+        observation = self.store.get_observation(saved["observation_id"])
+        if observation is None or observation["normalized_hash"] != saved["normalized_hash"]:
+            raise ValueError("snapshot observation hash mismatch")
+        self.store.verify_observation(observation)
+        if any(value != saved.get(key) for key, value in _snapshot_input(observation).items()):
+            raise ValueError("snapshot source hash or content mismatch")
+        return observation
+
+
+def _snapshot_input(observation: dict[str, Any]) -> dict[str, Any]:
+    return {name: observation[name] for name in (
+        "observation_id", "source_record_id", "normalized_hash", "raw_hash", "payload_hash",
+        "published_at", "ingested_at", "unit", "currency",
+    )} | {"value": observation["value_text"]}
+
+
+def _source_details(observation: dict[str, Any]) -> dict[str, Any]:
+    return {name: observation[name] for name in ("source_record_id", "locator", "raw_hash", "license")}
 
 
 def _calculate(values: dict[str, str]) -> dict[str, str]:
@@ -477,7 +501,7 @@ def _build_digest(formula_hash: str) -> str:
     digest = hashlib.sha256()
     digest.update(__version__.encode("utf-8"))
     digest.update(formula_hash.encode("ascii"))
-    for name in ("protocol.py", "store.py", "core.py"):
+    for name in ("protocol.py", "store.py", "core.py", "tushare_source.py"):
         digest.update((Path(__file__).with_name(name)).read_bytes())
     return "sha256:" + digest.hexdigest()
 

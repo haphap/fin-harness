@@ -8,10 +8,16 @@ from pathlib import Path
 from typing import Any
 
 from .protocol import ExecutionControl, ProtocolError, canonical_json, normalize_timestamp, parse_timestamp, require_decimal_string, sha256_json, timestamp_key
+from .tushare_source import cashflow_equivalence_key
 
 
 class AmbiguousSourceVersion(RuntimeError):
-    pass
+    def __init__(self, period: str, candidates: list[sqlite3.Row]):
+        super().__init__(f"{period} has {len(candidates)} eligible source versions")
+        self.details = {"period": period, "candidate_count": len(candidates),
+                        "candidates": [{key: row[key] for key in ("observation_id", "source_record_id")}
+                                       for row in candidates[:16]],
+                        "truncated": len(candidates) > 16}
 
 
 _IMMUTABLE_TABLES = (
@@ -448,7 +454,7 @@ class Store:
         time_column = "ingested_at" if knowledge_policy == "system" else "published_at"
         rows = self.connection.execute(
             f"""
-            SELECT o.observation_id, o.supersedes_observation_id, o.record_status,
+            SELECT o.observation_id, o.source_record_id, o.supersedes_observation_id, o.record_status,
                    r.supersedes_observation_id AS reviewed_predecessor, r.reviewed_at
             FROM observations o
             LEFT JOIN revision_links r USING(observation_id)
@@ -476,7 +482,17 @@ class Store:
             and (knowledge_policy == "public" or timestamp_key(row["reviewed_at"]) <= timestamp_key(as_of)))
         leaves = [row for row in rows if row["observation_id"] not in superseded]
         if len(leaves) != 1:
-            raise AmbiguousSourceVersion(f"{period_label} has {len(leaves)} eligible source versions")
+            candidates = [self.get_observation(row["observation_id"]) for row in leaves]
+            keys = [cashflow_equivalence_key(item) for item in candidates]
+            if keys and keys[0] is not None and all(key == keys[0] for key in keys):
+                for item in candidates:
+                    self.verify_observation(item)
+                # The query's stable earliest-visible order chooses a representative,
+                # not an update_flag winner. All other evidence goes into the snapshot.
+                selected = candidates[0]
+                selected["equivalent_observations"] = candidates[1:]
+                return selected
+            raise AmbiguousSourceVersion(period_label, leaves)
         selected = leaves[0]
         if selected["record_status"] == "withdrawn":
             return None

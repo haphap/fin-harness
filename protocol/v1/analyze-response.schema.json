@@ -163,7 +163,8 @@
             "source_error"
           ]
         },
-        "message": {"type": "string", "maxLength": 512}
+        "message": {"type": "string", "maxLength": 512},
+        "details": {"type": "object"}
       }
     }
   }

@@ -263,6 +263,32 @@ def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def cashflow_equivalence_key(observation: dict[str, Any]) -> str | None:
+    """Recognize this source's exact cashflow projection, never infer a revision."""
+    raw, locator = observation["raw"], observation["locator"]
+    if (observation["provider"] != "tushare-https" or not isinstance(raw, dict) or not isinstance(locator, dict)
+            or raw.keys() != set(DEFAULT_FIELDS.split(","))
+            or any(value is not None and not isinstance(value, str) for value in raw.values())
+            or raw["update_flag"] not in ("0", "1")
+            or locator.get("endpoint") != TUSHARE_ENDPOINT or locator.get("api_name") != "cashflow"
+            or locator.get("fields") != DEFAULT_FIELDS.split(",")
+            or locator.get("params") != {"ts_code": raw["ts_code"], "period": raw["end_date"], "is_calc": "0"}):
+        return None
+    try:
+        mapped = _map_cashflow_row(raw, entity_id=observation["entity_id"], ingested_at=observation["ingested_at"])
+        mapped["published_at"] = normalize_timestamp(mapped["published_at"])
+    except (TushareSourceError, ValueError):
+        return None
+    if any(observation["value_text" if name == "value" else name] != value for name, value in mapped.items()):
+        return None
+    # Different ingestion times are already handled by PIT. Disclosure times and
+    # every financial/source dimension still participate in this exact comparison.
+    mapped.pop("ingested_at")
+    return sha256_json({"raw": {k: v for k, v in raw.items() if k != "update_flag"},
+                        "mapped": mapped, "license": observation["license"],
+                        "predecessor": observation["supersedes_observation_id"]})
+
+
 def _iso_date(value: Any) -> str | None:
     if value in (None, ""):
         return None

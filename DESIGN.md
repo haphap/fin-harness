@@ -275,7 +275,7 @@ ChatGPT web ── OpenAI plugin ── HTTPS /mcp ──────┘
 - `scope` 至少区分 `consolidated | parent`。
 - `source_record_id` 指向不可变来源记录。locator 按来源类型变化：文档可用 URI/页/表/行，API 使用 endpoint、字段、脱敏参数、row key、原始 bytes hash；两者都带许可标签。
 - provider 返回维度与固定请求维度先完整保留，再映射到规范语义。未知 `report_type/comp_type/end_type` 一律拒绝；`is_calc` 固定请求 `0` 且不从响应猜测，不猜测合并、期间或调整状态。
-- 修订以 `supersedes_observation_id` 或明确撤回记录组成链；`update_flag` 不能独自决定先后。互相竞争且没有确定关系的记录返回 `ambiguous_source_version`。
+- 修订以 `supersedes_observation_id` 或明确撤回记录组成链；`update_flag` 不能独自决定先后。互相竞争且没有确定关系的记录返回 `ambiguous_source_version`。唯一等价例外是固定 Tushare cashflow 投影：PIT 可见候选经原始证据及映射校验后，除 `update_flag` 外的所有已选源字段、金融维度与披露时间一致时，可共享一个计算输入；不同入库时间仍各自受 PIT 约束，原行不删除，等价来源随快照固定并参与 explain/replay 完整性校验。
 - 原始值与标准化值分开保存，换算本身也产生血缘活动。
 
 ### 7.3 `MetricDefinition`
@@ -442,7 +442,7 @@ provider mapper 只有在完整识别上述维度后，才产生规范事实族�
  accounting_standard, unit, currency)
 ```
 
-每个 Observation 保留原始 source dimensions 和显式 `supersedes_observation_id`/撤回记录。对某一 policy，`known_from` 分别取 `published_at` 或 `ingested_at`；`known_to` 在查询时由同一修订链下一条记录的相应 `known_from` 推导，不通过更新旧行持久化。先筛选 `known_from <= as_of`，再沿当时已知的修订链选择叶节点；存在多个无确定 supersedes 关系的候选叶节点时返回 `ambiguous_source_version`，不得按行号、`update_flag` 或抓取顺序猜测。
+每个 Observation 保留原始 source dimensions 和显式 `supersedes_observation_id`/撤回记录。对某一 policy，`known_from` 分别取 `published_at` 或 `ingested_at`；`known_to` 在查询时由同一修订链下一条记录的相应 `known_from` 推导，不通过更新旧行持久化。先筛选 `known_from <= as_of`，再沿当时已知的修订链选择叶节点；存在多个非等价且无确定 supersedes 关系的候选叶节点时返回 `ambiguous_source_version`，不得按行号、`update_flag` 或抓取顺序猜测。对于已验证完全等价的来源，仅按稳定的最早可见顺序选展示代表，其他来源仍随 snapshot 固定，绝不据此创建修订关系。拒算的有界候选标识保存在 run 的 error.details 中，explain 原样返回，不用当前数据重建历史失败。
 
 把匹配 observation ID、输入 role、两个 knowledge timestamps、查询参数和内容哈希写入 snapshot manifest。首个指标只接受 `CN_CALENDAR_YEAR`、consolidated、YTD Q1/H1 精确期间；单季源行、母公司行、未知/不兼容 report type 均不参与计算。
 

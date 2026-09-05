@@ -203,6 +203,10 @@ source_unavailable | response_too_large | system_error
 
 响应返回输入 observation、期间转换、公式引用、重算步骤、校验和 source locator。`explain` 从已保存的 snapshot 与版本化公式重算中间步骤；MVP 不在 audit ledger 永久复制每一个中间 Decimal 值。远程入口必须先把 authenticated principal 映射到 tenant，并验证该 tenant 拥有目标 run；`run_id` 不构成授权。
 
+成功输入若来自已核验的 Tushare 等价记录，`inputs[].equivalent_sources` 列出其余 observation、披露/入库时间和 source locator/hash；四个金融输入不因此变成八个，也不重复计算。原始行及等价证据哈希保留在 snapshot，explain/replay 核验全部证据，不重新查询当前候选版本。
+
+拒算结果也出现在 explain 的 `results` 中：原样返回已记录的 `result_id/status/key/as_of/knowledge_policy/warnings/error`，不伪造公式或数值。`error.details` 可包含 `missing_roles`，或冲突期间 `period`、`candidate_count`、最多 16 对 observation/source ID 的 `candidates` 与 `truncated` 标记。这些信息在 analyze 时按 PIT 固定，后续导入不会改变旧拒算的解释。顶层 `status=ok` 仅表示解释请求成功，消费者仍须检查每项的计算状态；`result_ids` 筛选同时适用于成功与拒算项。
+
 `replay`、`doctor`、`capabilities` 是给操作者的 CLI 命令，不注入模型工具列表：
 
 ```text
