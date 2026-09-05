@@ -3,15 +3,16 @@ from __future__ import annotations
 import ipaddress
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Any
 
+import anyio
 from mcp.server import MCPServer
-from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 
 from . import __version__
 from .core import Engine
-from .protocol import PROTOCOL, ProtocolError, error_response, validate_envelope
+from .protocol import (DEFAULT_TIMEOUT_SECONDS, MAX_RESPONSE_BYTES, PROTOCOL, ExecutionControl,
+                       ProtocolError, canonical_json, exception_response, load_schema)
 from .store import Store
 
 INSTRUCTIONS = (
@@ -20,103 +21,60 @@ INSTRUCTIONS = (
     "and the user asks how a result was calculated or sourced. Never pass source values, formulas, SQL, or credentials."
 )
 
-_READ_ONLY = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-
-
-class FinancialTarget(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    metric_id: str = Field(
-        min_length=1,
-        description="Versioned metric identifier; v0.1 supports derived.cashflow.operating.single_quarter_yoy",
-    )
-    period: str = Field(pattern=r"^[0-9]{4}Q[1-4]$", description="Calendar quarter such as 2026Q2")
-    scope: Literal["consolidated", "parent"] = Field(
-        description="Financial statement scope; v0.1 calculation supports consolidated"
-    )
+_DESCRIPTIONS = {
+    "analyze": (
+        "Calculate an auditable point-in-time financial metric from harness-owned facts. "
+        "v0.1 supports derived.cashflow.operating.single_quarter_yoy, Q2 and consolidated scope. "
+        "public uses disclosure time; system uses local ingestion history. "
+        "Ask for entity, period and timezone-qualified as_of; never supply values, formulas, SQL or credentials."
+    ),
+    "explain": "Explain calculation steps and provenance for an existing fin-harness run_id. Use after financial_analyze.",
+}
 
 
 def create_mcp_server(database: str | Path, metric_registry: str | Path | None = None) -> MCPServer:
-    server = MCPServer(
-        "fin-harness",
-        description="Deterministic point-in-time financial analysis for agents",
-        instructions=INSTRUCTIONS,
-        version=__version__,
-    )
+    class FinancialServer(MCPServer):
+        # Public SDK extension points avoid a second contract and JSON-string argument coercion.
+        async def list_tools(self) -> list[Tool]:
+            definitions = load_schema("request")["$defs"]
+            return [Tool(
+                name=f"financial_{operation}",
+                description=_DESCRIPTIONS[operation],
+                input_schema={**definitions[f"{operation}Request"], "$defs": {"target": definitions["target"]}},
+                output_schema=load_schema(f"{operation}-response"),
+                annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                            idempotentHint=False, openWorldHint=False),
+            ) for operation in ("analyze", "explain")]
 
-    def handle(envelope: dict[str, Any]) -> dict[str, Any]:
-        store = Store(database)
-        try:
-            return Engine(store, metric_registry).handle(validate_envelope(envelope))
-        except ProtocolError as exc:
-            return error_response(envelope.get("request_id"), exc.code, exc.message)
-        finally:
-            store.close()
+        async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> CallToolResult:
+            control = ExecutionControl()
+            envelope = {"protocol": PROTOCOL, "operation": name.removeprefix("financial_"),
+                        "request_id": "mcp-" + uuid.uuid4().hex, "request": arguments, "context": {"client": "mcp"}}
 
-    @server.tool(
-        name="financial_analyze",
-        description=(
-            "Calculate an auditable point-in-time financial metric from harness-owned source facts. "
-            "Provide an entity ticker or alias, one or more metric/period/scope targets, an ISO-8601 as_of with timezone, "
-            "and public or system knowledge policy. v0.1 supports derived.cashflow.operating.single_quarter_yoy, Q2, "
-            "and consolidated scope. Do not provide financial values or formulas."
-        ),
-        annotations=_READ_ONLY,
-        structured_output=True,
-    )
-    def financial_analyze(
-        entity: Annotated[str, Field(min_length=1, max_length=128, description="Ticker, canonical entity ID, or alias")],
-        targets: Annotated[list[FinancialTarget], Field(min_length=1, max_length=16)],
-        as_of: Annotated[str, Field(description="ISO-8601 point in time including timezone")],
-        knowledge_policy: Literal["system", "public"],
-    ) -> dict[str, Any]:
-        return handle(
-            {
-                "protocol": PROTOCOL,
-                "operation": "analyze",
-                "request_id": "mcp-" + uuid.uuid4().hex,
-                "request": {
-                    "entity": entity,
-                    "targets": [target.model_dump() for target in targets],
-                    "as_of": as_of,
-                    "knowledge_policy": knowledge_policy,
-                },
-                "context": {"client": "mcp"},
-            }
-        )
+            def run() -> dict[str, Any]:
+                try:
+                    control.check()
+                    if name not in ("financial_analyze", "financial_explain"):
+                        raise ProtocolError("invalid_request", "unknown financial tool")
+                    with Store(database) as store:
+                        return Engine(store, metric_registry, control).handle(envelope)
+                except Exception as exc:
+                    return exception_response(envelope["request_id"], exc)
 
-    @server.tool(
-        name="financial_explain",
-        description=(
-            "Explain calculation steps and input provenance for an existing fin-harness run. "
-            "Use only after financial_analyze returned a run_id; optionally restrict the explanation to result_ids."
-        ),
-        annotations=_READ_ONLY,
-        structured_output=True,
-    )
-    def financial_explain(
-        run_id: Annotated[str, Field(min_length=1, max_length=128, description="run_id returned by financial_analyze")],
-        result_ids: Annotated[list[str] | None, Field(min_length=1, max_length=16)] = None,
-    ) -> dict[str, Any]:
-        request: dict[str, Any] = {"run_id": run_id}
-        if result_ids is not None:
-            request["result_ids"] = result_ids
-        return handle(
-            {
-                "protocol": PROTOCOL,
-                "operation": "explain",
-                "request_id": "mcp-" + uuid.uuid4().hex,
-                "request": request,
-                "context": {"client": "mcp"},
-            }
-        )
+            try:
+                with anyio.fail_after(DEFAULT_TIMEOUT_SECONDS):
+                    response = await anyio.to_thread.run_sync(run, abandon_on_cancel=True)
+            except TimeoutError:
+                control.cancel()
+                response = exception_response(envelope["request_id"], ProtocolError("timeout", "execution deadline exceeded"))
+            except BaseException:
+                control.cancel()
+                raise
+            return CallToolResult(content=[TextContent(type="text", text=canonical_json(response))],
+                                  structured_content=response, is_error=response["status"] == "error")
 
-    return server
+    return FinancialServer("fin-harness", description="Deterministic point-in-time financial analysis for agents",
+                           instructions=INSTRUCTIONS, version=__version__)
 
 
 def run_mcp(args: Any) -> int:
@@ -129,14 +87,8 @@ def run_mcp(args: Any) -> int:
         return 0
     if not _is_loopback(args.host):
         raise ValueError("unauthenticated Streamable HTTP is restricted to a loopback host")
-    server.run(
-        "streamable-http",
-        host=args.host,
-        port=args.port,
-        stateless_http=True,
-        json_response=True,
-        max_request_body_size=1024 * 1024,
-    )
+    server.run("streamable-http", host=args.host, port=args.port, stateless_http=True,
+               json_response=True, max_request_body_size=MAX_RESPONSE_BYTES)
     return 0
 
 

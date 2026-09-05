@@ -12,17 +12,45 @@
     "status": {"enum": ["ok", "error"]},
     "results": {
       "type": "array",
+      "maxItems": 16,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["result_id", "formula", "inputs", "steps", "validation"],
-        "properties": {
-          "result_id": {"type": "string"},
-          "formula": {"type": "object"},
-          "inputs": {"type": "array", "items": {"type": "object"}},
-          "steps": {"type": "array", "items": {"type": "object"}},
-          "validation": {"type": "object"}
-        }
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["result_id", "formula", "inputs", "steps", "validation"],
+            "properties": {
+              "result_id": {"type": "string"},
+              "formula": {"type": "object"},
+              "inputs": {"type": "array", "items": {"type": "object"}},
+              "steps": {"type": "array", "items": {"type": "object"}},
+              "validation": {"type": "object"}
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["result_id", "status", "key", "as_of", "knowledge_policy", "warnings", "error"],
+            "properties": {
+              "result_id": {"type": "string"},
+              "status": {"enum": ["insufficient_data", "ambiguous_entity", "ambiguous_metric", "ambiguous_source_version", "unsupported_metric", "not_applicable", "validation_failed", "source_error", "system_error"]},
+              "key": {"type": "object"},
+              "as_of": {"type": "string", "format": "date-time"},
+              "knowledge_policy": {"enum": ["system", "public"]},
+              "warnings": {"type": "array", "items": {"type": "string"}},
+              "error": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["code", "message"],
+                "properties": {
+                  "code": {"type": "string"},
+                  "message": {"type": "string", "maxLength": 512},
+                  "details": {"type": "object"}
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "error": {
@@ -30,9 +58,14 @@
       "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "code": {"enum": ["permission_denied", "snapshot_not_found", "replay_artifact_mismatch", "invalid_request", "system_error"]},
+        "code": {"enum": ["permission_denied", "snapshot_not_found", "replay_artifact_mismatch", "invalid_request", "unsupported_protocol", "rate_limited", "timeout", "cancelled", "source_unavailable", "response_too_large", "system_error"]},
         "message": {"type": "string", "maxLength": 512}
       }
     }
-  }
+  },
+  "allOf": [{
+    "if": {"properties": {"status": {"const": "error"}}},
+    "then": {"required": ["error"], "properties": {"results": {"maxItems": 0}}},
+    "else": {"required": ["run_id"]}
+  }]
 }

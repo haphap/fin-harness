@@ -30,6 +30,8 @@ where = ["src"]
 
 [tool.setuptools.data-files]
 "share/fin-harness/registry/metrics" = ["registry/metrics/*.json"]
+"share/fin-harness/protocol/v1" = ["protocol/v1/*.schema.json"]
+"share/fin-harness/protocol/v1/fixtures" = ["protocol/v1/fixtures/*.json"]
 
 [dependency-groups]
 dev = [

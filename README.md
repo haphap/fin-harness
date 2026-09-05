@@ -92,8 +92,44 @@ uv run fin-harness import-tushare 600000.SH 20260630 \
 ```
 
 This command is intentionally operator-only. It never appears as an MCP tool.
-Multiple competing report versions remain ambiguous unless an explicit
-`supersedes_observation_id` relationship is reviewed and imported.
+For the fixed Tushare cashflow projection, PIT-visible rows that differ only in
+`update_flag` may share a calculation input after every financial dimension,
+disclosure time and mapped value is verified equal. All raw rows remain stored;
+the snapshot pins their hashes, and explain lists `equivalent_sources`. No row is
+treated as a newer revision just because its update flag is `1`.
+
+Multiple genuinely competing report versions remain ambiguous unless an explicit
+`supersedes_observation_id` relationship is reviewed and imported. If both versions
+are already stored, use the operator-only command (never a model tool):
+
+```bash
+fin-harness link-revision OBS_NEW OBS_OLD --reviewer YOUR_NAME --reason "verified amended filing" --config examples/config.json
+```
+
+This appends an immutable review record; it never edits either observation.
+`system` applies the relationship only from the actual review time. `public`
+may use the reviewed relationship for already-disclosed versions; this is public
+history reconstruction, not a claim that the local system knew the relationship then.
+
+Explain also returns recorded rejections, including missing input roles or up to
+16 conflicting observation/source ID pairs. Its top-level `ok` means the
+explanation was retrieved, not that the underlying financial calculation passed.
+Reimporting the same raw row preserves its first ingestion time. Conflicting
+observation values or supersedes fields are rejected instead of silently ignored.
+
+### Existing databases
+
+Opening a v1 database adds evidence/revision tables without rewriting historical
+facts, snapshots or runs. Legacy rows missing the original import payload are
+refused until their original fixture is reimported to append verifiable evidence.
+If that original evidence is unavailable, use a new database and an explicitly
+new import; do not backdate it. Old runs still require their original code/registry
+artifacts for replay. Back up the database before upgrading; do not use an older
+binary to write an upgraded database.
+
+The registry path may select another copy of the audited v1 definition, not an
+arbitrary formula configuration. Different inputs, precision or formulas require
+an implementation change and a newly reviewed definition.
 
 ## Scope and safety
 

@@ -203,6 +203,10 @@ source_unavailable | response_too_large | system_error
 
 响应返回输入 observation、期间转换、公式引用、重算步骤、校验和 source locator。`explain` 从已保存的 snapshot 与版本化公式重算中间步骤；MVP 不在 audit ledger 永久复制每一个中间 Decimal 值。远程入口必须先把 authenticated principal 映射到 tenant，并验证该 tenant 拥有目标 run；`run_id` 不构成授权。
 
+成功输入若来自已核验的 Tushare 等价记录，`inputs[].equivalent_sources` 列出其余 observation、披露/入库时间和 source locator/hash；四个金融输入不因此变成八个，也不重复计算。原始行及等价证据哈希保留在 snapshot，explain/replay 核验全部证据，不重新查询当前候选版本。
+
+拒算结果也出现在 explain 的 `results` 中：原样返回已记录的 `result_id/status/key/as_of/knowledge_policy/warnings/error`，不伪造公式或数值。`error.details` 可包含 `missing_roles`，或冲突期间 `period`、`candidate_count`、最多 16 对 observation/source ID 的 `candidates` 与 `truncated` 标记。这些信息在 analyze 时按 PIT 固定，后续导入不会改变旧拒算的解释。顶层 `status=ok` 仅表示解释请求成功，消费者仍须检查每项的计算状态；`result_ids` 筛选同时适用于成功与拒算项。
+
 `replay`、`doctor`、`capabilities` 是给操作者的 CLI 命令，不注入模型工具列表：
 
 ```text
@@ -228,7 +232,7 @@ MCP 初始化 `instructions` 只描述跨工具流程、共同约束和速率限
 
 MCP server 自己生成 `request_id` 并将 session metadata 记录为非授权 correlation。业务拒算作为成功的工具调用返回结构化 result；只有 MCP framing、schema 或未处理内部故障使用协议/tool error。
 
-取消由 MCP SDK 接收并传给 core。core 在原子提交点前检查取消：不得发布半个结果集；若已生成 snapshot，可保留 `cancelled` 运行事件供诊断，但不能返回权威值。
+取消由 MCP SDK 接收并经共享 ExecutionControl 传给 core；同步工作线程在最终事务提交 gate 检查取消和期限。gate 前取消会回滚 run/snapshot/audit；gate 已通过后的取消不能撤销已提交的运行，客户端仍可能收不到响应。不会返回或持久化部分结果集。
 
 ## 5. 宿主适配矩阵
 
@@ -312,6 +316,7 @@ OpenCode 和 DeepSeek Harness 只需要配置，不创建空壳 adapter package�
 - 启用 HTTP profile 时，同一 fixture 经 MCP stdio 与 Streamable HTTP 得到相同规范化 `results`；
 - `insufficient_data`/歧义/校验失败不会变成 transport error；
 - Decimal 不以 JSON number 泄漏；
+- 小数秒、错误实际期间、原始证据内容损坏、审核后追加修订关系、提交前取消、超限和非法参数均有反例测试；
 - 每个适配器对相同 fixtures 只改变 correlation/rendering，不改变金融结果；
 - 未授权 Mosaic call 在进入 Harness 前被拒绝；取消不会留下可发布的部分结果。
 - MCP instructions、tool descriptions、schema 与 annotations 可被发现，且 metadata、错误、日志和结果均不泄漏凭据。

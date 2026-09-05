@@ -55,7 +55,7 @@
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/target"}
         },
-        "as_of": {"type": "string", "format": "date-time"},
+        "as_of": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?([Zz]|[+-][0-9]{2}:[0-9]{2})$"},
         "knowledge_policy": {"enum": ["system", "public"]}
       }
     },

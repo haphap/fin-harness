@@ -12,11 +12,17 @@ from typing import Any
 from . import __version__
 from .core import Engine
 from .protocol import (
+    DEFAULT_TIMEOUT_SECONDS,
     MAX_RESPONSE_BYTES,
+    MAX_SOURCE_CALLS,
+    MAX_TARGETS,
     CancelledError,
+    ExecutionControl,
     ProtocolError,
     canonical_json,
+    check_response_size,
     error_response,
+    exception_response,
     validate_envelope,
 )
 from .store import Store
@@ -35,6 +41,12 @@ def _parser() -> argparse.ArgumentParser:
     importer.add_argument("path")
     importer.add_argument("--config")
     importer.add_argument("--json", action="store_true")
+    revision = subparsers.add_parser("link-revision")
+    revision.add_argument("observation_id")
+    revision.add_argument("supersedes_observation_id")
+    revision.add_argument("--reviewer", required=True)
+    revision.add_argument("--reason", required=True)
+    revision.add_argument("--config")
     tushare = subparsers.add_parser("import-tushare")
     tushare.add_argument("ts_code")
     tushare.add_argument("period", help="report period as YYYYMMDD")
@@ -72,18 +84,24 @@ def _config(path: str | None) -> dict[str, Any]:
     return config
 
 
-def _engine(config_path: str | None) -> tuple[Store, Engine]:
+def _engine(config_path: str | None, control: ExecutionControl | None = None) -> tuple[Store, Engine]:
     config = _config(config_path)
     store = Store(config["database"])
-    return store, Engine(store, config.get("metric_registry"))
+    try:
+        return store, Engine(store, config.get("metric_registry"), control)
+    except BaseException:
+        store.close()
+        raise
 
 
-def _write(value: Any) -> None:
+def _write(value: Any) -> int:
+    check_response_size(value)
     rendered = canonical_json(value).encode("utf-8")
-    if len(rendered) > MAX_RESPONSE_BYTES:
-        rendered = canonical_json(error_response(None, "response_too_large", "response exceeds 1 MiB")).encode("utf-8")
     sys.stdout.buffer.write(rendered + b"\n")
     sys.stdout.buffer.flush()
+    if isinstance(value, dict) and value.get("status") == "error":
+        return 2 if value.get("error", {}).get("code") in ("invalid_request", "unsupported_protocol") else 70
+    return 0
 
 
 def _read_stdin() -> Any:
@@ -100,20 +118,40 @@ def _cancel(*_: object) -> None:
     raise CancelledError("operation cancelled")
 
 
+def _timeout(*_: object) -> None:
+    raise ProtocolError("timeout", "execution deadline exceeded")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    request_id = None
+    handlers = {}
     try:
         if args.command == "mcp":
             from .mcp_adapter import run_mcp
 
             return run_mcp(args)
-        store, engine = _engine(args.config)
+        control = ExecutionControl()
+        if args.command in ("invoke", "explain", "replay"):
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                handlers[sig] = signal.signal(sig, _cancel)
+            if hasattr(signal, "SIGALRM"):
+                handlers[signal.SIGALRM] = signal.signal(signal.SIGALRM, _timeout)
+                signal.setitimer(signal.ITIMER_REAL, DEFAULT_TIMEOUT_SECONDS)
+        store, engine = _engine(args.config, control)
         try:
             if args.command == "invoke":
-                signal.signal(signal.SIGTERM, _cancel)
-                envelope = validate_envelope(_read_stdin())
-                _write(engine.handle(envelope))
-                return 0
+                envelope = _read_stdin()
+                request_id = envelope.get("request_id") if isinstance(envelope, dict) else None
+                return _write(engine.handle(envelope))
+            if args.command == "link-revision":
+                try:
+                    store.link_revision(args.observation_id, args.supersedes_observation_id,
+                                        reviewer=args.reviewer, reason=args.reason)
+                except ValueError as exc:
+                    raise ProtocolError("invalid_request", str(exc)) from exc
+                return _write({"status": "ok", "observation_id": args.observation_id,
+                               "supersedes_observation_id": args.supersedes_observation_id})
             if args.command == "import-fixture":
                 _write({"status": "ok", "imported": store.import_fixture(args.path)})
                 return 0
@@ -161,7 +199,8 @@ def main(argv: list[str] | None = None) -> int:
                         "operations": ["analyze", "explain"],
                         "tools": ["financial_analyze", "financial_explain"],
                         "metrics": [engine.metric["metric_id"]],
-                        "limits": {"targets": 16, "source_calls": 8, "response_bytes": MAX_RESPONSE_BYTES},
+                        "limits": {"targets": MAX_TARGETS, "source_calls": MAX_SOURCE_CALLS,
+                                   "response_bytes": MAX_RESPONSE_BYTES, "timeout_seconds": DEFAULT_TIMEOUT_SECONDS},
                     }
                 )
                 return 0
@@ -172,19 +211,16 @@ def main(argv: list[str] | None = None) -> int:
                 envelope = validate_envelope(
                     {"protocol": "fin-harness/v1", "operation": "explain", "request_id": "cli-explain", "request": request}
                 )
-                _write(engine.explain(envelope))
-                return 0
+                request_id = "cli-explain"
+                return _write(engine.handle(envelope))
             if args.command == "replay":
-                _write(engine.replay(args.run_id))
-                return 0
+                return _write(engine.replay(args.run_id))
         finally:
             store.close()
     except ProtocolError as exc:
-        _write(error_response(None, exc.code, exc.message))
-        return 2
-    except CancelledError:
-        _write(error_response(None, "cancelled", "operation cancelled"))
-        return 70
+        return _write(exception_response(request_id, exc))
+    except CancelledError as exc:
+        return _write(exception_response(request_id, exc))
     except Exception as exc:
         from .tushare_source import TushareSourceError
 
@@ -194,6 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fin-harness: {type(exc).__name__}", file=sys.stderr)
         _write(error_response(None, "system_error", "internal system error"))
         return 70
+    finally:
+        if hasattr(signal, "SIGALRM") and signal.SIGALRM in handlers:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        for sig, previous in handlers.items():
+            signal.signal(sig, previous)
     return 70
 
 

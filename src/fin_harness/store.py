@@ -3,15 +3,21 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .protocol import ProtocolError, canonical_json, normalize_timestamp, parse_timestamp, require_decimal_string, sha256_json
+from .protocol import ExecutionControl, ProtocolError, canonical_json, normalize_timestamp, parse_timestamp, require_decimal_string, sha256_json, timestamp_key
+from .tushare_source import cashflow_equivalence_key
 
 
 class AmbiguousSourceVersion(RuntimeError):
-    pass
+    def __init__(self, period: str, candidates: list[sqlite3.Row]):
+        super().__init__(f"{period} has {len(candidates)} eligible source versions")
+        self.details = {"period": period, "candidate_count": len(candidates),
+                        "candidates": [{key: row[key] for key in ("observation_id", "source_record_id")}
+                                       for row in candidates[:16]],
+                        "truncated": len(candidates) > 16}
 
 
 _IMMUTABLE_TABLES = (
@@ -20,7 +26,12 @@ _IMMUTABLE_TABLES = (
     "snapshots",
     "runs",
     "audit_events",
+    "source_payloads",
+    "revision_links",
 )
+
+_FACT_FIELDS = ("entity_id", "metric_id", "period_start", "period_end", "basis",
+                "scope", "accounting_standard", "unit", "currency")
 
 
 class Store:
@@ -30,6 +41,10 @@ class Store:
         self.path = str(Path(path).expanduser()) if str(path) != ":memory:" else ":memory:"
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
+        if self.connection.execute("PRAGMA user_version").fetchone()[0] not in (0, 1, 2):
+            self.close()
+            raise ValueError("unsupported database schema version")
+        self.connection.create_function("fin_timestamp", 1, timestamp_key, deterministic=True)
         self.connection.execute("PRAGMA foreign_keys = ON")
         self._create_schema()
 
@@ -89,6 +104,18 @@ class Store:
                 fact_key_hash TEXT NOT NULL,
                 normalized_hash TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS source_payloads (
+                source_record_id TEXT PRIMARY KEY REFERENCES source_records(source_record_id),
+                payload_json TEXT NOT NULL,
+                payload_hash TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS revision_links (
+                observation_id TEXT PRIMARY KEY REFERENCES observations(observation_id),
+                supersedes_observation_id TEXT NOT NULL REFERENCES observations(observation_id),
+                reviewed_at TEXT NOT NULL,
+                reviewer TEXT NOT NULL,
+                reason TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS observations_pit_idx ON observations(
                 entity_id, metric_id, period_label, basis, scope, published_at, ingested_at
             );
@@ -122,7 +149,7 @@ class Store:
                 payload_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
-            PRAGMA user_version = 1;
+            PRAGMA user_version = 2;
             """
         )
         for table in _IMMUTABLE_TABLES:
@@ -255,31 +282,29 @@ class Store:
                 if not isinstance(value, str) or not value.startswith("sha256:") or len(value) != 71:
                     raise ValueError(f"{name} must be a sha256 digest")
         raw_hash = sha256_json(record["raw"])
-        source_normalized_hash = raw_hash
         normalized_hash = sha256_json(observation)
+        payload = {"record": record, "license": license_info}
         existing = self.connection.execute(
             "SELECT raw_hash, normalized_hash FROM source_records WHERE source_record_id = ?",
             (record["source_record_id"],),
         ).fetchone()
         if existing:
-            if existing["raw_hash"] != raw_hash or existing["normalized_hash"] != source_normalized_hash:
+            if existing["raw_hash"] != raw_hash:
                 raise ValueError("source_record_id already exists with different content")
+            stored = self.get_observation(observation["observation_id"])
+            if stored is None or stored["source_record_id"] != record["source_record_id"]:
+                raise ValueError("source_record_id already has a different observation")
+            self._compare_payload(stored, payload, reimport=True)
+            if stored["payload_hash"] is None:
+                # Recover missing original evidence in legacy databases only from an exact import.
+                if normalized_hash != stored["normalized_hash"]:
+                    raise ValueError("legacy observation requires its original import payload")
+                self._save_payload(record["source_record_id"], payload)
             return 0
 
-        fact_key = {
-            name: observation[name]
-            for name in (
-                "entity_id",
-                "metric_id",
-                "period_start",
-                "period_end",
-                "basis",
-                "scope",
-                "accounting_standard",
-                "unit",
-                "currency",
-            )
-        }
+        fact_key = {name: observation[name] for name in _FACT_FIELDS}
+        if observation["supersedes_observation_id"] is not None:
+            self._validate_revision(observation, observation["supersedes_observation_id"])
         self.connection.execute(
             """
             INSERT INTO source_records VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -290,7 +315,7 @@ class Store:
                 canonical_json(record["locator"]),
                 canonical_json(record["raw"]),
                 raw_hash,
-                source_normalized_hash,
+                raw_hash,  # Legacy column retained for compatibility; not an independent digest.
                 canonical_json(license_info),
                 ingested_text,
             ),
@@ -327,7 +352,89 @@ class Store:
             """,
             parameters,
         )
+        self._save_payload(record["source_record_id"], payload)
         return 1
+
+    def _save_payload(self, source_record_id: str, payload: dict[str, Any]) -> None:
+        self.connection.execute("INSERT INTO source_payloads VALUES (?, ?, ?)",
+                                (source_record_id, canonical_json(payload), sha256_json(payload)))
+
+    @staticmethod
+    def _compare_payload(stored: dict[str, Any], payload: dict[str, Any], *, reimport: bool = False) -> None:
+        record = payload["record"]
+        observation = dict(record["observation"])
+        for field in ("published_at", "ingested_at"):
+            observation[field] = normalize_timestamp(observation[field])
+        if reimport:
+            observation["ingested_at"] = stored["ingested_at"]  # First sighting stays authoritative.
+        for field, expected in observation.items():
+            actual = stored["value_text" if field == "value" else field]
+            if actual != expected:
+                raise ValueError(f"observation content mismatch: {field}; use link-revision for reviewed supersession")
+        locator, saved_locator = dict(record["locator"]), dict(stored["locator"])
+        if reimport:
+            for key in ("response_raw_hash", "response_normalized_hash"):
+                locator.pop(key, None)
+                saved_locator.pop(key, None)
+        if (record["source_record_id"] != stored["source_record_id"] or record["provider"] != stored["provider"]
+                or record["raw"] != stored["raw"] or locator != saved_locator or payload["license"] != stored["license"]):
+            raise ValueError("source content mismatch")
+        if not reimport and observation["ingested_at"] != stored["source_ingested_at"]:
+            raise ValueError("source ingestion time mismatch")
+
+    def verify_observation(self, observation: dict[str, Any]) -> None:
+        if observation["payload_hash"] is None:
+            raise ValueError("legacy source evidence missing; reimport the original fixture before analysis")
+        payload = observation["payload"]
+        if sha256_json(payload) != observation["payload_hash"]:
+            raise ValueError("source payload hash mismatch")
+        if sha256_json(payload["record"]["observation"]) != observation["normalized_hash"]:
+            raise ValueError("observation hash mismatch")
+        if sha256_json(observation["raw"]) != observation["raw_hash"]:
+            raise ValueError("source raw hash mismatch")
+        self._compare_payload(observation, payload)
+        if sha256_json({name: observation[name] for name in _FACT_FIELDS}) != observation["fact_key_hash"]:
+            raise ValueError("fact key hash mismatch")
+
+    def _validate_revision(self, successor: dict[str, Any], predecessor_id: str) -> None:
+        predecessor = self.get_observation(predecessor_id)
+        if predecessor is None or any(successor[key] != predecessor[key] for key in _FACT_FIELDS):
+            raise ValueError("revision must supersede an existing observation in the same fact family")
+        self.verify_observation(predecessor)
+        for field in ("published_at", "ingested_at"):
+            if parse_timestamp(successor[field]) < parse_timestamp(predecessor[field]):
+                raise ValueError("revision cannot precede its predecessor")
+        visited = {successor["observation_id"]}
+        current = predecessor_id
+        while current:
+            if current in visited:
+                raise ValueError("revision cycle is forbidden")
+            visited.add(current)
+            row = self.connection.execute(
+                "SELECT COALESCE(r.supersedes_observation_id, o.supersedes_observation_id) AS previous "
+                "FROM observations o LEFT JOIN revision_links r USING(observation_id) WHERE o.observation_id = ?",
+                (current,),
+            ).fetchone()
+            current = row["previous"] if row else None
+
+    def link_revision(self, observation_id: str, predecessor_id: str, *, reviewer: str, reason: str) -> None:
+        if not reviewer.strip() or not reason.strip() or len(reviewer) > 128 or len(reason) > 512:
+            raise ValueError("reviewer (1..128) and reason (1..512) are required")
+        with self.connection:
+            successor = self.get_observation(observation_id)
+            if successor is None:
+                raise ValueError("successor observation not found")
+            self.verify_observation(successor)
+            self._validate_revision(successor, predecessor_id)
+            existing = self.connection.execute("SELECT supersedes_observation_id FROM revision_links WHERE observation_id = ?",
+                                               (observation_id,)).fetchone()
+            previous = successor["supersedes_observation_id"] or (existing[0] if existing else None)
+            if previous is not None:
+                if previous != predecessor_id:
+                    raise ValueError("revision relationship is immutable")
+                return
+            self.connection.execute("INSERT INTO revision_links VALUES (?, ?, ?, ?, ?)",
+                (observation_id, predecessor_id, datetime.now(timezone.utc).isoformat(), reviewer, reason))
 
     def resolve_entity(self, alias: str) -> str | None:
         row = self.connection.execute(
@@ -347,17 +454,18 @@ class Store:
         time_column = "ingested_at" if knowledge_policy == "system" else "published_at"
         rows = self.connection.execute(
             f"""
-            SELECT o.*, s.locator_json, s.raw_hash, s.license_json
+            SELECT o.observation_id, o.source_record_id, o.supersedes_observation_id, o.record_status,
+                   r.supersedes_observation_id AS reviewed_predecessor, r.reviewed_at
             FROM observations o
-            JOIN source_records s USING(source_record_id)
+            LEFT JOIN revision_links r USING(observation_id)
             WHERE o.entity_id = ?
               AND o.metric_id = 'statement.cashflow.operating_net'
               AND o.period_label = ?
               AND o.basis = 'ytd'
               AND o.scope = ?
               AND o.accounting_standard = 'CAS'
-              AND o.{time_column} <= ?
-            ORDER BY o.{time_column}, o.ingested_at, o.observation_id
+              AND fin_timestamp(o.{time_column}) <= fin_timestamp(?)
+            ORDER BY fin_timestamp(o.{time_column}), fin_timestamp(o.ingested_at), o.observation_id
             """,
             (entity_id, period_label, scope, as_of),
         ).fetchall()
@@ -369,17 +477,26 @@ class Store:
             for row in rows
             if row["supersedes_observation_id"] in by_id
         }
+        superseded.update(row["reviewed_predecessor"] for row in rows
+            if row["reviewed_predecessor"] in by_id
+            and (knowledge_policy == "public" or timestamp_key(row["reviewed_at"]) <= timestamp_key(as_of)))
         leaves = [row for row in rows if row["observation_id"] not in superseded]
         if len(leaves) != 1:
-            raise AmbiguousSourceVersion(f"{period_label} has {len(leaves)} eligible source versions")
+            candidates = [self.get_observation(row["observation_id"]) for row in leaves]
+            keys = [cashflow_equivalence_key(item) for item in candidates]
+            if keys and keys[0] is not None and all(key == keys[0] for key in keys):
+                for item in candidates:
+                    self.verify_observation(item)
+                # The query's stable earliest-visible order chooses a representative,
+                # not an update_flag winner. All other evidence goes into the snapshot.
+                selected = candidates[0]
+                selected["equivalent_observations"] = candidates[1:]
+                return selected
+            raise AmbiguousSourceVersion(period_label, leaves)
         selected = leaves[0]
         if selected["record_status"] == "withdrawn":
             return None
-        result = dict(selected)
-        result["source_dimensions"] = json.loads(result.pop("source_dimensions_json"))
-        result["locator"] = json.loads(result.pop("locator_json"))
-        result["license"] = json.loads(result.pop("license_json"))
-        return result
+        return self.get_observation(selected["observation_id"])
 
     def persist_run(
         self,
@@ -387,9 +504,13 @@ class Store:
         run: dict[str, Any],
         snapshots: list[dict[str, Any]],
         audit_events: list[dict[str, Any]],
+        control: ExecutionControl | None = None,
     ) -> None:
+        control = control or ExecutionControl()
+        control.check()
         with self.connection:
             for snapshot in snapshots:
+                control.check()
                 existing = self.connection.execute(
                     "SELECT manifest_hash FROM snapshots WHERE snapshot_id = ?",
                     (snapshot["snapshot_id"],),
@@ -435,6 +556,7 @@ class Store:
                         event["created_at"],
                     ),
                 )
+            control.commit(self.connection)
 
     def get_run(self, run_id: str, tenant: str) -> dict[str, Any] | None:
         row = self.connection.execute(
@@ -461,8 +583,10 @@ class Store:
     def get_observation(self, observation_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             """
-            SELECT o.*, s.locator_json, s.raw_hash, s.license_json
+            SELECT o.*, s.provider, s.raw_json, s.locator_json, s.raw_hash, s.license_json,
+                   s.ingested_at AS source_ingested_at, p.payload_json, p.payload_hash
             FROM observations o JOIN source_records s USING(source_record_id)
+            LEFT JOIN source_payloads p USING(source_record_id)
             WHERE o.observation_id = ?
             """,
             (observation_id,),
@@ -470,6 +594,9 @@ class Store:
         if row is None:
             return None
         result = dict(row)
+        result["raw"] = json.loads(result.pop("raw_json"))
+        payload = result.pop("payload_json")
+        result["payload"] = json.loads(payload) if payload is not None else None
         result["source_dimensions"] = json.loads(result.pop("source_dimensions_json"))
         result["locator"] = json.loads(result.pop("locator_json"))
         result["license"] = json.loads(result.pop("license_json"))
