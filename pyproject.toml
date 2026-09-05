@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fin-harness"
 version = "0.1.0"
-description = "Deterministic, point-in-time financial analysis harness for agents"
+description = "Auditable, point-in-time financial calculations for AI agents via JSON CLI and MCP"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -15,6 +15,7 @@ dependencies = []
 
 [project.urls]
 Repository = "https://github.com/haphap/fin-harness"
+Documentation = "https://github.com/haphap/fin-harness#readme"
 Issues = "https://github.com/haphap/fin-harness/issues"
 
 [project.scripts]

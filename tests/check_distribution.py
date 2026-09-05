@@ -18,7 +18,7 @@ with zipfile.ZipFile(wheel) as archive:
 with tarfile.open(sdist) as archive:
     prefix = "fin_harness-0.1.0/"
     names = archive.getnames()
-    for directory in ("protocol", "tests/fixtures", "integrations"):
+    for directory in ("protocol", "tests/fixtures", "integrations", "docs"):
         for path in (ROOT / directory).rglob("*"):
             if path.is_file():
                 assert prefix + path.relative_to(ROOT).as_posix() in names, path

@@ -1,5 +1,9 @@
 # Mosaic integration
 
+[Project overview](../../README.md) · [Host guide](../../docs/integrations.md) · [Wire protocol](../../PROTOCOL.md)
+
+Status: integration guidance, not a shipped Mosaic adapter or completed host acceptance test.
+
 Mosaic owns agent identity, signed capabilities, stage allowlists, run scheduling,
 and bundle materialization. Financial Harness owns only the financial request and
 result contract.

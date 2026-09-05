@@ -1,8 +1,10 @@
 # Financial Harness 设计方案
 
-状态：Proposed v0.4
-日期：2026-09-04
-范围：绿地 MVP，面向可复现、可审计的金融数据分析
+状态：v0.1 架构决策与后续路线图
+日期：2026-09-05
+范围：本地研究 MVP，面向可复现、可审计的金融数据分析
+
+本文已按合并主线核对。已实现 CLI/MCP、SQLite/PIT、固定 Q2 指标、受控 Tushare 导入及等价来源/拒算解释；真实 Pi print 模式已烟测。下文的扩展、生产门槛和远程部署仍为目标，不是已交付承诺。两项已知 P1 与验证范围见 [EVALUATION.md](EVALUATION.md)；首次使用从 [README](README.md)、[使用指南](docs/usage.md)和[宿主接入](docs/integrations.md)开始。
 
 ## 1. 结论
 
@@ -19,7 +21,7 @@ Financial Harness 应当是 Agent 与金融数据之间的**确定性执行与�
 - 一个版本化指标目录和受信任纯函数计算表；
 - 一套黄金案例和对抗测试。
 
-首个纵向切片聚焦**上市公司财报衍生指标**，覆盖累计转单季、同比、存量/流量对齐、PIT、重述、单位、拒算和逐值血缘。Claim Graph、通用工作流平台、图数据库、微服务、在线交易和自动策略演化均推迟到证据表明需要时。
+首个纵向切片聚焦**上市公司财报衍生指标**，已实现 Q2 累计转单季、同比、PIT、修订选择、单位一致性校验、拒算和逐值血缘；通用存量/流量对齐并未实现。Claim Graph、通用工作流平台、图数据库、微服务、在线交易和自动策略演化均推迟到证据表明需要时。
 
 ## 2. 背景与证据
 
@@ -85,7 +87,7 @@ Financial Harness 应当是 Agent 与金融数据之间的**确定性执行与�
 - 精确 canonical entity ID 和显式 alias 表；模糊匹配只返回候选，不自动落锤。
 - 三大财务报表的少量原始科目。
 - 5 类衍生能力：累计转单季、同比/环比、TTM、期初期末平均、比率/百分比。
-- 第一个纵向切片只实现 1 个代表性指标；闭环通过后扩到 8–12 个。
+- 第一个纵向切片只实现 1 个代表性指标；后续按领域需求和独立审核逐个扩展，不预定数量。
 - 单值与键控多值请求。
 - PIT/重述选择、Decimal 计算、单位归一、血缘、硬校验和审计。
 - one-shot CLI、optional MCP stdio 与离线评测。
@@ -94,7 +96,7 @@ Financial Harness 应当是 Agent 与金融数据之间的**确定性执行与�
 
 | 能力 | 推迟原因 | 何时增加 |
 |---|---|---|
-| HTTP 服务 | 单用户本地库与 ChatGPT desktop 不需要远程边界 | ChatGPT web 成为交付目标，或出现远程多用户需求 |
+| 公网 HTTP 服务 | 已有 loopback 测试模式，但无远程认证边界 | ChatGPT web 成为交付目标，或出现远程多用户需求 |
 | DuckDB/Parquet | SQLite 足够验证首批财报闭环 | 数据超过 SQLite 扫描/SLA，或需要大规模 benchmark |
 | OpenTelemetry exporter | 单进程 JSON 日志足够定位问题 | 多进程/远程工具调用出现 |
 | OpenLineage exporter/backend | 当前无企业目录消费者 | 需要接入企业数据目录，并由 adapter 映射内部 ID |
@@ -138,7 +140,7 @@ Mosaic / Pi adapter      OpenCode / DeepSeek Harness
 - 模型只看到 `financial_analyze` 与 `financial_explain`；doctor/replay/capabilities 不进入模型上下文；
 - 身份、签名、审批、session 和 cancellation 由宿主/adapter 管理，金融语义由 core 管理。
 
-插件在这里指“符合公共协议的外部可执行能力”，不指绑定任一宿主 SDK 的源码插件。OpenAI 插件只是该能力面向 ChatGPT 网页版的一种薄分发包装，不拥有金融逻辑。MVP 不实现第二套常驻 JSON-RPC server；若首发目标仅为本地 Agent 和 ChatGPT desktop，也不实现 HTTP。
+插件在这里指“符合公共协议的外部可执行能力”，不指绑定任一宿主 SDK 的源码插件。OpenAI 插件只是该能力面向 ChatGPT 网页版的一种薄分发包装，不拥有金融逻辑。MVP 不实现第二套常驻 JSON-RPC server；现有 HTTP 仅为同一 MCP adapter 的 loopback 测试模式。
 
 ### 6.2 内部模块职责
 
@@ -156,14 +158,15 @@ Mosaic / Pi adapter      OpenCode / DeepSeek Harness
 Tushare 同时提供 [Python SDK/HTTP API](https://tushare.pro/document/1?doc_id=40) 和[官方远程 MCP 服务](https://tushare.pro/document/1?doc_id=463)。对 Agent 仍暴露 Financial Harness 自己的 MCP；权威数据入库默认使用固定 HTTPS endpoint 的薄客户端，而不是 Tushare MCP 或先转换成 pandas float 的 SDK 表格。
 
 ```text
-Agent Host
-  -> fin-harness mcp            # 北向：受治理的金融工具
-  -> Core
-  -> tushare_source
-  -> Tushare HTTPS API          # 南向：原始 JSON bytes + Decimal 解析
+操作者 -> import-tushare -> tushare_source -> Tushare HTTPS API
+                              |
+                              v
+                         SQLite 原始事实
+                              ^
+Agent Host -> CLI / MCP -> Core（分析不联网）
 ```
 
-选择直接 HTTPS 的原因是 Harness 必须在供应商数值变成 binary float 前保留响应字节并按 Decimal 解析，同时明确指定 endpoint/fields、控制分页/重试并冻结 fixture。标准库客户端比 SDK+pandas 更少依赖，也不需要拦截 SDK 内部传输。官方 MCP 当前公开文档未给出稳定的 `tools/list`/output schema，而且面向 Agent 的压缩或格式化不应进入权威入库链。不能让 Agent 先调用 Tushare MCP 再把数值传给 Harness。
+选择直接 HTTPS 的原因是 Harness 必须在供应商数值变成 binary float 前计算响应字节哈希并按 Decimal 解析，同时明确指定 endpoint/fields。当前每次导入只请求一个标的的一个期间，无自动分页/重试；数据库保存规范化原始行及导入证据，不永久保留整份 HTTP 响应字节。标准库客户端无需 SDK+pandas 或 MCP source。面向 Agent 的摘要/格式化数值不能作为权威入库链输入，也不能让 Agent 先调用 Tushare MCP 再把数值传给 Harness。
 
 `AnalysisRequest` 不新增 `provider=tushare`。MVP 的数据源由操作者配置并固定，Agent 不能选择供应商；出现第二个真实供应商和明确的 fallback 规则后，再在 server 内增加路由。
 
@@ -181,31 +184,32 @@ Agent Host
 | `update_flag` | 当前版本提示，不单独充当修订顺序 |
 | Harness 抓取时间 | `ingested_at` |
 
-[Tushare cashflow](https://tushare.pro/document/2?doc_id=44) 文档确认这些字段和报表类型。`published_at` 优先使用实际披露日 `f_ann_date`，缺失时才使用 `ann_date`，两者都保留在 SourceRecord；两者均缺失时 `public` policy 拒算。日期只有日精度时，同一公告日内不声称盘中可知：记录 `source_time_precision=day`，从 Asia/Shanghai 下一自然日 `00:00` 起进入 public 信息集。`system` 历史回放只读本地已归档且 `ingested_at <= as_of` 的版本，禁止为了补历史缺口临时查询当前 Tushare。
+[Tushare cashflow](https://tushare.pro/document/2?doc_id=44) 文档列出了字段与报表类型；当前 source 只接受已映射的合并累计类型。published_at 优先使用实际披露日 f_ann_date，缺失时才使用 ann_date，两者都保留在 SourceRecord；两者均缺失时当前导入器直接拒绝。日期只有日精度时，同一公告日内不声称盘中可知：记录 source_time_precision=day，从上海时区下一自然日 00:00 起进入 public 信息集。system 只读本地实际已归档版本，禁止为了补历史缺口临时查询当前 Tushare。
 
 `tushare_source.py` 只 POST 到固定 `https://api.tushare.pro`，使用系统 CA 校验证书、显式 timeout/响应大小上限，并在解析前保存响应 bytes 哈希。JSON decoder 使用 `parse_float=Decimal`；选定字段再规范化为十进制字符串。source adapter 负责：
 
 - 将结构化原始行映射为 Observation；
 - 保存 endpoint、fields、脱敏参数、原始 bytes hash、规范化响应行 hash 和抓取时间；
 - 按 source contract 固定每个字段的单位、倍数、维度和 canonical decimal 序列化；
-- PIT/重述选择、snapshot、Decimal、校验和审计；
-- 显式 fields、分页/限流/重试和部分失败的类型化映射。
+- 显式 fields、timeout/大小上限及单次请求失败的类型化映射。
+
+PIT/修订选择、snapshot、Decimal 计算、金融校验和审计由 store/core 负责，不复制在 source adapter 中。自动分页、限流调度和重试待真实需求出现后再做。
 
 token 只从 `TUSHARE_TOKEN` 注入并放入 HTTPS request body；不写入本地配置、请求快照、日志或审计。首版固定 API 名、字段集并保存脱敏响应 fixture；字段缺失或 schema 漂移时 provider fail closed。真实接入先限定为 token 持有者本地单用户用途；账号共享、缓存、解释输出和再分发范围没有书面许可前，不开放多人服务。以后只有 Tushare MCP 能通过同一套 source contract fixtures且稳定返回未摘要结构化行时，才增加可选 MCP source；它不作为 HTTPS source 的静默 fallback。
 
 ### 6.4 ChatGPT：两种部署形态，一个 MCP 契约
 
-ChatGPT desktop 与 ChatGPT web 不是同一种部署边界：
+ChatGPT desktop 与 ChatGPT web 不是同一种部署边界。下图的 web 分支及本节远程授权/分发要求是后续规划，尚未交付；当前启动方式和官方资料见[宿主指南](docs/integrations.md)。
 
 ```text
 ChatGPT desktop ── MCP stdio ────────────────────┐
-                                                 ├─> MCP adapter -> Core -> Tushare HTTPS
+                                                 ├─> MCP adapter -> Core -> SQLite
 ChatGPT web ── OpenAI plugin ── HTTPS /mcp ──────┘
                               Streamable HTTP
 ```
 
-- **desktop/local**：直接配置 `fin-harness mcp`，由本机启动进程。SQLite、snapshot、audit 与 `TUSHARE_TOKEN` 都留在受信任主机；不需要公网服务或 OpenAI 插件包。
-- **web/hosted**：ChatGPT 网页版不读取本地 MCP 配置。需要将同一个 MCP adapter 以 Streamable HTTP 暴露在稳定公网 HTTPS `/mcp`，在 ChatGPT Developer Mode 注册该连接，再用一个只包含清单和已注册连接映射的 OpenAI 插件安装到 ChatGPT。
+- **desktop/local**：直接配置 fin-harness mcp，由本机启动进程。SQLite、snapshot 与 audit 留在受信任主机；TUSHARE_TOKEN 只交给操作者的导入进程，MCP 不需要该凭据。工具响应仍会进入宿主模型上下文，不等于供应商数据从不离开本机。
+- **web/hosted**：ChatGPT 网页版不读取本地 MCP 配置。后续需为同一个 MCP adapter 提供稳定公网 HTTPS `/mcp`、认证与租户授权，再按交付时的官方注册和分发流程接入。连接/插件包装不属于金融公共契约，不能直接公开当前未认证的 loopback 服务。
 - 两种形态只改变 transport 与部署位置；`financial_analyze`、`financial_explain`、JSON Schema、PIT、Decimal、状态和审计语义必须相同。不得为 ChatGPT 再写一套 Python core 或 TypeScript 金融实现。
 - MCP 初始化 `instructions` 只写跨工具规则；工具选择和参数由工具 description、input/output schema 与 annotations 驱动。关键指引放在前 512 字符：何时调用 `financial_analyze`、缺少 entity/period/`as_of` 时先澄清、何时凭 `run_id` 调用 `financial_explain`、不得让模型提交源值或公式。
 - 首版不加自定义 UI，也不要求独立 skill；只有代表性对话证明工具 metadata 不足以稳定完成多步工作流时，才给插件增加 skill。
@@ -488,9 +492,9 @@ timeout | cancelled | snapshot_not_found | replay_artifact_mismatch |
 source_unavailable | system_error
 ```
 
-CLI、MCP stdio 与未来 HTTP 使用同一映射表。one-shot 进程收到终止信号时回滚当前事务；若宿主直接强杀而无法返回 JSON，调用方按无响应 transport failure 处理。取消/超时在最终事务 gate 前生效时不得提交 Result 或可发布 snapshot；gate 已通过后的取消不能撤销已提交运行，且客户端可能收不到响应。领域 `source_error/system_error` 只用于已进入分析后的单元格失败；请求级故障使用顶层 error。
+CLI、MCP stdio 与 loopback HTTP 使用同一映射表。one-shot 进程收到终止信号时回滚当前事务；若宿主直接强杀而无法返回 JSON，调用方按无响应 transport failure 处理。取消/超时在最终事务 gate 前生效时不得提交 Result 或可发布 snapshot；gate 已通过后的取消不能撤销已提交运行，且客户端可能收不到响应。领域 `source_error/system_error` 只用于已进入分析后的单元格失败；请求级故障使用顶层 error。
 
-v1 固定上限：单请求一个实体、最多 16 个 targets、最多 8 次上游调用、默认 60 秒执行期限、序列化响应不超过 1 MiB。操作者可以调低，模型不能调高；超过上限返回结构化顶层错误且不提交部分结果。
+v1 固定上限：单请求一个实体、最多 16 个 targets、默认 60 秒执行期限、序列化领域响应不超过 1 MiB；CLI stdin/HTTP body 另限 1 MiB。当前没有公开调节配置，模型也不能调整。capabilities 中的 8 次 source_calls 是预留预算，分析不会在线取数；独立 import-tushare 每次只发一个请求。具体传输与错误边界以 [PROTOCOL.md](PROTOCOL.md) 为准。
 
 ## 11. 血缘、审计与可复现
 
@@ -587,7 +591,7 @@ SQLite trigger 保证的是应用运行边界内的 append-only，不等同于�
 
 不先安装 tushare SDK、pandas、Polars、DuckDB、Airflow、Dagster、MLflow、Kafka、Neo4j、OpenLineage backend 或 FastAPI。
 
-### 14.2 建议目录
+### 14.2 当前目录
 
 ```text
 fin-harness/
@@ -597,18 +601,23 @@ fin-harness/
 │   ├── core.py
 │   ├── store.py
 │   ├── tushare_source.py        # 唯一首版 vendor HTTPS integration
+│   ├── mcp_adapter.py           # optional extra，共用 core
 │   └── cli.py
 ├── registry/metrics/*.json
 ├── protocol/v1/*.schema.json
 ├── tests/
 │   ├── test_vertical_slice.py
 │   └── fixtures/
-└── adapters/mcp.py              # 安装 optional extra 后启用
+├── integrations/                # Pi 薄扩展、Mosaic 接入说明
+├── examples/hosts/              # MCP 宿主配置
+└── docs/                        # 使用与宿主指南
 ```
 
-这是目标布局，不应一次生成空壳文件。按纵向切片创建实际需要的文件。
+仅保留实际使用的模块；不为后续宿主创建空壳包。公共兼容边界是 JSON/CLI/MCP，不是此内部目录或数据库表。
 
 ## 15. 实施路线图
+
+以下保留阶段目标以说明先后关系；M0–M5 的有限实现与测试证据见 EVALUATION，不意味着每项生产退出条件都已满足。M6 的 loopback transport 已验证，其公网认证/分发部分仍未交付。
 
 ### M0：冻结公共协议与一个样例
 
@@ -685,10 +694,10 @@ v0.1 退出条件：真实四期间导入、分析、解释与重放闭环成功
 
 仅当 ChatGPT web 是明确交付目标时执行：
 
-- 为已有 MCP tool registry 增加 Streamable HTTP transport，不创建第二套工具实现；
+- 复用已通过 loopback 测试的 Streamable HTTP transport，补齐远程安全边界，不创建第二套工具实现；
 - 部署稳定公网 HTTPS `/mcp`，配置 secret manager、限流、日志脱敏和所需 OAuth 2.1；
 - 固定 MCP SDK/协议兼容版本，并用 negative/interop tests 覆盖 Origin、协议版本、OAuth discovery、session 过期和断线取消；
-- 在 ChatGPT Developer Mode 注册 MCP 连接，并生成只含 manifest 与 `.app.json` 映射的薄插件包；
+- 按交付时官方流程注册 MCP 连接；若需插件分发，仅添加必要的薄包装，不预设内部连接 ID 或清单文件为金融契约；
 - 用同一组 fixtures 验证 stdio/HTTP 结果等价，再完成 workspace 或公开分发测试；
 - 在公开发布前确认 Tushare 数据许可、配额归属和服务条款。
 
@@ -716,7 +725,7 @@ v0.1 退出条件：真实四期间导入、分析、解释与重放闭环成功
 |---|---|---|
 | 首要场景 | 离线研究与评测，不含交易执行 | 最先验证可靠性和可复现性 |
 | 首个任务族 | 上市公司财报衍生指标 | 一条切片覆盖共享对话的关键风险 |
-| 首个数据源 | Tushare 固定 HTTPS API；fixture 先行 | 在 float 前保存原始响应并按 Decimal 解析；MCP 保留给 Agent-facing 边界 |
+| 首个数据源 | Tushare 固定 HTTPS API；fixture 先行 | 在 float 前计算响应字节 hash，再按 Decimal 解析并保存规范化行；MCP 保留给 Agent-facing 边界 |
 | 部署 | Python 单体 + one-shot CLI + MCP stdio；ChatGPT web 按需加同 server 的 HTTP profile | 通用宿主边界，不拆金融 core |
 | 存储 | SQLite | 标准库、事务、约束、足够的首版规模 |
 | 权威算术 | Python Decimal | 可显式控制精度与舍入 |
@@ -726,7 +735,7 @@ v0.1 退出条件：真实四期间导入、分析、解释与重放闭环成功
 | 血缘 | 内部关系表/JSON；标准映射留给 exporter | 支持审计且不为假想消费者预留字段 |
 | Claim Graph | 不进入 MVP | 尚无已验证的下游决策闭环 |
 
-## 18. 开工前必须确认的决策
+## 18. 扩展或生产前必须确认的决策
 
 1. Tushare 许可是否允许真实数据的本地长期快照？多人服务、缓存和再分发分别需要什么书面许可？
 2. 后续指标扩展由谁承担领域审核？
@@ -734,11 +743,11 @@ v0.1 退出条件：真实四期间导入、分析、解释与重放闭环成功
 4. Mosaic 与 Pi adapter 的长期维护归属和发布节奏是什么？
 5. ChatGPT 首个目标是 desktop 本地使用、workspace web 使用，还是公开插件？后两者需要远程部署、认证与数据许可决策。
 
-首版已固定中国 A 股/CAS、Q2 经营现金流单季同比和显式 `knowledge_policy`。其余问题未确认前，可以安全完成 fixture-only 的 M1–M4；不得伪造真实许可、多人服务或生产 SLO。
+首版已固定中国 A 股/CAS、Q2 经营现金流单季同比和显式 knowledge_policy，已获用户对特定临时真实数据烟测的确认。该确认不代表长期存储、多人服务或再分发权利；不能由技术测试推断生产 SLO。
 
 ## 19. 下一步
 
-先做一个薄而完整的演示：
+以下演示链路已实现并验证：
 
 ```text
 fixture 财报
@@ -750,4 +759,4 @@ fixture 财报
   -> explain/replay 展示完整血缘
 ```
 
-同一 fixture 先通过 direct core 与 `fin-harness invoke`，再接 MCP，并首先用 ChatGPT desktop 验证本地 stdio。只有明确需要 ChatGPT web 时才进入 M6；不要为“未来也许要用”预先增加公网服务、OAuth、UI 或多租户平台。
+下一步先修复已知的非法时区 offset 与并发修订关联 P1，补齐真实宿主/UI 消费者验收，再开展多日影子运行和逐指标扩展。只有明确需要 ChatGPT Web 且具备数据许可时才进入 M6 的远程阶段；不预先增加公网服务、UI 或多租户平台。

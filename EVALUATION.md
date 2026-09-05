@@ -2,6 +2,8 @@
 
 评估日期：2026-09-05
 
+代码基线：合并提交 `1e3940a`（[PR #1](https://github.com/haphap/fin-harness/pull/1)），包含原审核修复 `07f30f2` 和真实 Pi 回归修复 `ddd0753`。后述 48 项测试与真实数据成功记录对应这条已合并代码主线，不是仅本地未提交能力。操作步骤见[使用指南](docs/usage.md)，连接方式见[宿主指南](docs/integrations.md)。
+
 ## 结论
 
 2026-09-05 审核发现旧测试集未覆盖小数秒 PIT、实际期间不符和跨入口取消等问题，因此撤回之前仅凭 23 项测试便认定满足全部发布门槛的表述。修复后的证据是下列有限黄金集与对抗集通过，不等价于所有金融数据或全部真实宿主已获生产验收。交付范围仍是：中国 A 股/CAS、合并口径 Q2 经营现金流单季同比、JSON/SQLite、本地 CLI/MCP，以及仅限 loopback 的未认证 Streamable HTTP。
@@ -22,11 +24,13 @@
 最终回归命令：
 
 ```bash
-uv run python -m unittest discover -s tests -v
-uvx ruff@0.15.15 check .
+uv sync --frozen --extra mcp --dev
+uv run --extra mcp python -m unittest discover -s tests -v
+uvx ruff check src tests
 uv run python -m compileall -q src tests
 node --experimental-strip-types --check integrations/pi/fin-harness.ts
 uv build
+uv run python tests/check_distribution.py
 ```
 
 测试套件共 48 项，包含七张 append-only 表、非法协议/参数反例、checked-in Schema 与 MCP 发布契约一致性、CLI 单行 framing、stdio/loopback HTTP、Pi 薄 adapter→真实 CLI、Tushare 字段漂移和无 token 时不联网的类型化失败，以及等价来源和拒算 explain 的回归。
@@ -50,6 +54,15 @@ Ruff 检查命令：`uvx --offline ruff check src tests`。自动化 Pi adapter 
 - 保留所有权威行；快照固定全部等价来源的引用/哈希，explain 展示四个计算输入及附加等价证据，replay 逐条验证。不新增表、依赖或宿主专用执行路径。
 - 拒算 explain 返回当次持久化的结果、原因及有界候选标识/缺失角色，不再返回空数组；后续导入不会改变历史诊断。CLI/MCP、部分拒算与 result_ids 筛选均有回归。
 - 既有 Tushare 原始行无需重新导入。执行构建摘要包含等价规则：旧 run 仍要求原构建解释/重放，应新建 analyze run 使用修复，不能绕过构建一致性校验。
+
+## 文档验证（合并后）
+
+README、操作指南、宿主指南及协议/设计文档已按合并主线核对，未修改金融内核或增加运行时依赖：
+
+- 在仓库外导出合并代码、创建全新虚拟环境和数据库，按 README 执行 frozen sync → 合成导入 → analyze → explain → replay → doctor/capabilities：首次 5 条记录、`0.3333` / `33.33%`、四输入和 `match=true` 均通过。
+- 独立数据库示例、当前时间请求生成器及请求/响应 Schema 校验通过；本轮不调用模型或访问 Tushare。
+- 58 个本地 Markdown 链接/锚点、9 段 JSON 及 12 段 Shell 示例通过检查；Shell 以 Bash/zsh 语法校验，不把配置样例当作真实宿主验收。
+- 48 项回归、Ruff、wheel/sdist 构建和 clean-wheel 无依赖 analyze/replay 通过；源码包包含两份新指南。
 
 ## 受控真实数据烟测
 

@@ -1,7 +1,9 @@
 # Financial Harness 宿主无关协议
 
-状态：Proposed v1
-日期：2026-09-04
+状态：已实现的 v1 公共契约；远程生产入口仍为规划
+日期：2026-09-05
+
+实现基线：已合并的 [PR #1](https://github.com/haphap/fin-harness/pull/1)，含等价来源和拒算 explain 修复。操作步骤见[使用指南](docs/usage.md)和[宿主接入](docs/integrations.md)；验证与已知缺陷见 [EVALUATION.md](EVALUATION.md)。下文“必须”描述契约要求，不代表已通过任意输入或所有宿主的生产验收。
 
 ## 1. 目标
 
@@ -10,13 +12,13 @@ Financial Harness 以**外部可执行插件**而不是某个 Agent SDK 内的�
 ```text
 任意宿主 ── one-shot JSON ──> fin-harness invoke ──> Core
 本地 MCP 宿主 ── stdio ─────> fin-harness mcp ─────> Core
-ChatGPT web ── plugin/HTTPS ─> fin-harness mcp ─────> Core
-                 Streamable HTTP
+本机 MCP 测试 ── loopback HTTP ─> fin-harness mcp ─> Core
+ChatGPT web ── 远程认证/插件部署（尚未交付）
 ```
 
 `fin-harness invoke` 是最低公分母和合约测试入口；`fin-harness mcp` 是 OpenCode、DeepSeek Harness、ChatGPT 等 MCP 客户端的标准入口。两者调用同一个 core，不通过网络互相转发。操作者可用同一 `--config PATH` 启动参数选择数据目录与非敏感配置；凭据只从宿主受控环境/secret store 注入，不进入请求。
 
-本地 MVP 不提供自定义长期 JSON-RPC server、HTTP 服务或宿主 SDK。ChatGPT desktop 直接使用 stdio；只有将 ChatGPT web 纳入交付目标时，才为同一个 MCP adapter 启用 Streamable HTTP，并增加认证与薄插件包装。
+本地 MVP 不提供自定义长期 JSON-RPC server 或宿主 SDK。MCP 默认 stdio，另有同核 loopback Streamable HTTP 测试模式；公开部署所需认证、租户映射与插件包装尚未交付。analyze/explain 只读已导入的金融事实并写本地运行/审计，不在调用期间查询 Tushare。
 
 ## 2. 稳定边界
 
@@ -52,7 +54,9 @@ stderr:  日志、诊断、堆栈；不得混入 stdout
 
 - `0`：成功生成符合协议的 response；包括 `insufficient_data` 等领域拒算；
 - `2`：envelope/JSON/schema 无效；response 的 `error.code` 为 `invalid_request` 或 `unsupported_protocol`；
-- `70`：内部/进程故障；能安全序列化时返回脱敏 `system_error`，进程启动失败等情形可能没有 stdout。
+- `70`：其他请求级错误或内部/进程故障，例如 timeout、snapshot_not_found、response_too_large；可序列化时保留具体 error.code，未知异常脱敏为 system_error，进程启动失败可能没有 stdout。
+
+以上是 invoke 的语义。操作者 import-tushare 遇到上游不可用时另返回 69；argparse 参数解析失败不保证 stdout 有协议对象。
 
 调用方以 JSON response 为业务事实，不从 stderr 或自然语言推断成功。
 
@@ -86,13 +90,15 @@ stderr:  日志、诊断、堆栈；不得混入 stdout
 
 - `request_id` 由调用方生成，只用于关联；不授予权限，也不承诺幂等缓存。每次重试使用新 ID，确定性由 snapshot/公式/代码版本保证；
 - `context` 可省略，只用于审计关联，core 不据此鉴权；禁止放 secret、签名 capability 或用户自然语言；
-- `entity` 每次只允许一个；多实体由宿主发多次请求，避免首版批处理语义；
+- `entity` 每次只允许一个；使用已导入的精确代码、canonical ID 或独立别名，不拼接名称和代码；多实体由宿主发多次请求；
 - `targets` 支持单值和键控表格；每个 target 只有目录中的 `metric_id/period/scope`，不能携带公式、SQL、输入值或代码；
-- 请求不携带 vendor/provider；上游 Tushare HTTPS 等数据源由 server 配置，模型不能切换；
+- 请求不携带 vendor/provider；操作者预先导入固定来源，模型不能切换供应商或触发在线取数；
 - `as_of` 必须含时区；`knowledge_policy` 必须显式为 `system` 或 `public`。
-- v1 每次请求最多 16 个 targets、最多 8 次上游调用、默认 60 秒期限、响应最大 1 MiB；操作者可调低但调用方不能调高。
+- 当前每次分析最多 16 个 targets，序列化领域响应最多 1 MiB，执行期限 60 秒；CLI stdin 和 HTTP request body 另有 1 MiB 输入上限（不把它等同于 MCP stdio 的消息 framing 限制）。这些上限暂不能通过配置文件调整。capabilities 中 source_calls=8 是预留预算，当前分析不产生上游调用；import-tushare 每次发一个独立请求，默认网络 timeout 为 20 秒、上游响应上限 8 MiB。
 
 ### 3.3 分析响应
+
+下例数值为示意，ID/hash 已简写，不是实际公司结果或可重放凭证。可运行的完整请求与黄金结果见 [fixtures](protocol/v1/fixtures)。
 
 ```json
 {
@@ -151,7 +157,7 @@ stderr:  日志、诊断、堆栈；不得混入 stdout
 - `rejected`：请求有效，但没有可发布的权威值；
 - `error`：系统/数据源失败。
 
-result `status` 是封闭枚举：
+analyze result `status` 是封闭枚举；部分状态为后续领域扩展保留，并不代表已有对应功能：
 
 ```text
 ok | insufficient_data | ambiguous_entity | ambiguous_metric |
@@ -217,7 +223,7 @@ fin-harness capabilities --json
 
 ## 4. MCP 接口
 
-`fin-harness mcp` 使用官方 MCP SDK，不自行实现 JSON-RPC 生命周期。本地模式默认使用 stdio，stdout 仅承载 MCP 消息且日志仅写 stderr；ChatGPT web 部署使用同一工具注册表和 Streamable HTTP transport。
+`fin-harness mcp` 使用官方 MCP SDK，不自行实现 JSON-RPC 生命周期。本地模式默认使用 stdio，stdout 仅承载 MCP 消息且日志仅写 stderr；loopback HTTP 复用同一工具注册表。未来远程部署也必须复用此表。
 
 模型只看到两个工具：
 
@@ -230,7 +236,7 @@ MCP 初始化 `instructions` 只描述跨工具流程、共同约束和速率限
 
 推荐的首段 server instruction 语义是：需要可审计的金融事实或衍生指标时调用 `financial_analyze`；缺少实体、期间或 `as_of` 时先澄清；只在已有 `run_id` 且用户要追问计算过程/证据时调用 `financial_explain`；永远不要把源数据值、公式、SQL、凭据交给工具。插件 skill 不是 v1 正确调用的前置条件。
 
-MCP server 自己生成 `request_id` 并将 session metadata 记录为非授权 correlation。业务拒算作为成功的工具调用返回结构化 result；只有 MCP framing、schema 或未处理内部故障使用协议/tool error。
+MCP server 自己生成 request_id，当前仅记录 context.client=mcp，不透传完整 session metadata。业务拒算作为成功的工具调用返回结构化 result；顶层 status=error 映射为 MCP isError=true，同时保留结构化协议错误。Pi 同样保留协议对象，但宿主事件未必标为 tool error；调用方必须读取 response.status/error。
 
 取消由 MCP SDK 接收并经共享 ExecutionControl 传给 core；同步工作线程在最终事务提交 gate 检查取消和期限。gate 前取消会回滚 run/snapshot/audit；gate 已通过后的取消不能撤销已提交的运行，客户端仍可能收不到响应。不会返回或持久化部分结果集。
 
@@ -241,9 +247,9 @@ MCP server 自己生成 `request_id` 并将 session metadata 记录为非授权 
 | OpenCode | local MCP：`fin-harness mcp` | 0 | MCP 配置、进程超时、session correlation |
 | DeepSeek Harness | 官方 `@deepseek-ai/dsh-mcp-client` 连接 `fin-harness mcp` | 0 | plugin 配置、权限/审批、超时；固定已验证版本 |
 | ChatGPT desktop | local MCP：`fin-harness mcp` | 0 | MCP 配置、工具启用/审批、进程环境与超时 |
-| ChatGPT web | OpenAI plugin 连接公网 HTTPS Streamable HTTP `/mcp` | 仅清单/连接描述 | 插件安装、工具启用/审批；Harness 服务负责鉴权与租户隔离 |
-| Pi | TypeScript extension 注册两个工具，spawn `fin-harness invoke` | 约 60–100 行 | `AbortSignal`、tool result 渲染、进程权限 |
-| Mosaic | controller 在 capability 签发前调用 `fin-harness invoke` 并物化 bundle | 约 60–100 行 | signed capability、allowlist、bundle/snapshot、run/node/stage、usage ledger |
+| ChatGPT web（未交付） | 远程 MCP 与插件分发 | 后续认证/部署和薄清单 | 插件安装、工具审批；服务端鉴权与租户隔离 |
+| Pi | TypeScript extension 注册两个工具，spawn `fin-harness invoke` | 已提供薄扩展 | AbortSignal、tool result 渲染、进程权限 |
+| Mosaic（待宿主实现） | controller 在 capability 签发前调用 invoke 并物化 bundle | 当前仅接入说明 | signed capability、allowlist、bundle/snapshot、run/node/stage、usage ledger |
 
 适配器只允许做五件事：
 
@@ -278,9 +284,9 @@ Pi 官方不内置 MCP，使用 `pi.registerTool()` 的 extension。extension �
 
 ChatGPT desktop 直接配置本地 stdio server，不需要额外 adapter。ChatGPT web 不读取本地 MCP 配置，必须通过已安装插件访问远程 MCP；插件是分发描述，不是新的 Harness 实现。
 
-当前 ChatGPT web 开发流程先在 Developer Mode 按稳定 HTTPS `/mcp` URL 注册远程 MCP 连接，取得 `plugin_asdk_app...` 技术 ID，再由插件根目录的 `.app.json` 映射该连接，并让 `.codex-plugin/plugin.json` 的兼容 `apps` 字段指向 `./.app.json`。`.mcp.json` 用于声明随插件分发的 MCP server，不与 web 的已注册连接映射混用。
+本仓库尚未提供可安装的远程插件。正式进入该阶段时，应按届时的 OpenAI 官方文档完成连接注册、认证和薄清单分发；不把早期设想的技术 ID 或清单字段当作 fin-harness/v1 的公共契约。
 
-MVP 不加入 UI、hooks 或重复一份工具 schema；schema 的唯一来源仍是 `protocol/v1`，MCP server 在 `tools/list` 中发布它。公开提交前，endpoint 必须稳定可达并支持 Streamable HTTP；需要用户身份时使用 OAuth 2.1，在每次请求上执行服务端授权。Tushare token 只保存在服务端 secret manager。
+MVP 不加入 UI、hooks 或重复一份 MCP schema；schema 的唯一来源仍是 protocol/v1，MCP server 在 tools/list 中发布它。公开部署前必须具备稳定 HTTPS、服务端身份/授权和数据许可；本地 loopback 模式没有这些能力。Tushare token 只交给受控导入进程，不需要进入模型工具进程。
 
 ## 6. 包边界
 
@@ -292,18 +298,13 @@ fin-harness (Python package)
 ├── core + store           # private implementation
 └── tushare_source         # optional fixed-endpoint HTTPS integration
 
-fin-harness-pi (optional npm/pi package)
-└── thin extension
-
-MOSAIC-RKE
-└── thin local adapter + its own capability policy
-
-distributions/openai-plugin (only when ChatGPT web ships)
-├── .codex-plugin/plugin.json
-└── .app.json             # maps the registered ChatGPT MCP connection ID
+源码 / sdist 中的宿主材料
+├── integrations/pi/fin-harness.ts   # 由 Pi 直接加载，无独立 npm 包
+├── integrations/mosaic/README.md   # 待 Mosaic 实现
+└── examples/hosts/                 # MCP 配置样例
 ```
 
-OpenCode 和 DeepSeek Harness 只需要配置，不创建空壳 adapter package。
+OpenCode 和 DeepSeek Harness 只需要配置，不创建空壳 adapter package。远程 OpenAI 插件包尚未交付。
 
 ## 7. 合约测试
 
@@ -318,10 +319,10 @@ OpenCode 和 DeepSeek Harness 只需要配置，不创建空壳 adapter package�
 - Decimal 不以 JSON number 泄漏；
 - 小数秒、错误实际期间、原始证据内容损坏、审核后追加修订关系、提交前取消、超限和非法参数均有反例测试；
 - 每个适配器对相同 fixtures 只改变 correlation/rendering，不改变金融结果；
-- 未授权 Mosaic call 在进入 Harness 前被拒绝；取消不会留下可发布的部分结果。
+- 新增 Mosaic handler 后须验证未授权调用在进入 Harness 前被拒绝（当前未实现该 handler）；现有 CLI/MCP 取消不留下可发布的部分结果。
 - MCP instructions、tool descriptions、schema 与 annotations 可被发现，且 metadata、错误、日志和结果均不泄漏凭据。
 
-最初只实现一个 `analyze` fixture、一个缺数据拒算 fixture 和一个 `explain` fixture。覆盖真实错误后再扩充，不先搭建通用插件框架。
+当前保留合成黄金 fixture 和按真实错误增加的对抗测试，不搭建通用插件框架。成功 explain 项含 inputs/formula/steps，拒算项含 status/error；消费者必须处理两种 Schema 分支，而非假定每项都有数值或 steps。
 
 ## 8. 接口依据
 
@@ -332,4 +333,4 @@ OpenCode 和 DeepSeek Harness 只需要配置，不创建空壳 adapter package�
 - [OpenCode MCP servers](https://opencode.ai/v2/docs/mcp-servers)：本地 MCP 进程和远程 MCP 配置；
 - [DeepSeek Harness 官方 MCP client](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/mcp/mcp-client/README.md)：stdio/Streamable HTTP client 及工具注册；
 - [Pi 使用文档](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/usage.md)与[扩展文档](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)：Pi 不内置 MCP，工具由 extension 注册；
-- Mosaic 本机实现：[`protocol.py`](../MOSAIC-RKE/mosaic/bridge/protocol.py) 与 [`handlers/tools.py`](../MOSAIC-RKE/mosaic/bridge/handlers/tools.py)。
+- Mosaic 项目边界见[本仓库接入说明](integrations/mosaic/README.md)；不依赖读者拥有某个同级本机仓库。
