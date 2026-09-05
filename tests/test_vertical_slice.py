@@ -242,8 +242,9 @@ class HarnessTest(unittest.TestCase):
         metric["version"] = "changed-for-test"
         metric_path = Path(self.tempdir.name) / "changed-metric.json"
         metric_path.write_text(json.dumps(metric), encoding="utf-8")
-        mismatch = Engine(self.store, metric_path).replay(response["run_id"], tenant="tenant-a")
-        self.assertEqual("replay_artifact_mismatch", mismatch["error"]["code"])
+        with self.assertRaises(ProtocolError) as caught:
+            Engine(self.store, metric_path)
+        self.assertEqual("replay_artifact_mismatch", caught.exception.code)
 
     def test_invalid_protocol_is_typed(self) -> None:
         request = load(SUCCESS_REQUEST)
@@ -306,9 +307,9 @@ class HarnessTest(unittest.TestCase):
                 analyze_schema = tools["financial_analyze"].input_schema
                 self.assertEqual(
                     ["metric_id", "period", "scope"],
-                    analyze_schema["$defs"]["FinancialTarget"]["required"],
+                    analyze_schema["$defs"]["target"]["required"],
                 )
-                self.assertFalse(analyze_schema["$defs"]["FinancialTarget"]["additionalProperties"])
+                self.assertFalse(analyze_schema["$defs"]["target"]["additionalProperties"])
                 self.assertEqual(16, analyze_schema["properties"]["targets"]["maxItems"])
 
                 direct_request = load(SUCCESS_REQUEST)

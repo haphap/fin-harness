@@ -15,7 +15,7 @@
     },
     "knowledge_policy": "system",
     "provenance": {
-      "calculation_id": "calc_9145b0ee914c4ce27b013d71",
+      "calculation_id": "calc_2ec7e55ec6e73433afa857df",
       "inputs": [
         {"observation_id": "obs_current_h1_v1", "role": "current_h1", "source_record_id": "src_current_h1_v1", "transform": "identity"},
         {"observation_id": "obs_current_q1", "role": "current_q1", "source_record_id": "src_current_q1", "transform": "subtract_from_current_h1"},
@@ -23,7 +23,7 @@
         {"observation_id": "obs_prior_q1", "role": "prior_q1", "source_record_id": "src_prior_q1", "transform": "subtract_from_prior_h1"}
       ]
     },
-    "result_id": "result_9145b0ee914c4ce27b013d71",
+    "result_id": "result_2ec7e55ec6e73433afa857df",
     "semantics": {
       "accounting_standard": "CAS",
       "currency": null,
@@ -31,11 +31,13 @@
       "unit": "1",
       "value_kind": "ratio"
     },
-    "snapshot_id": "snap_adc507956a69c5942c47a7bb",
+    "snapshot_id": "snap_de24ed737a4b70de90eaa274",
     "source_time_precision": "day",
     "status": "ok",
     "validation": {
-      "check_ids": ["pit", "same_scope", "same_currency", "same_unit", "nonzero_denominator"],
+      "check_ids": ["pit",
+        "exact_periods",
+        "source_integrity", "same_scope", "same_currency", "same_unit", "nonzero_denominator"],
       "status": "passed"
     },
     "value": "0.3333",

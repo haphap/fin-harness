@@ -453,6 +453,8 @@ provider mapper 只有在完整识别上述维度后，才产生规范事实族�
 - `as_of` 与匹配到的 `published_at/ingested_at` 必须同时出现在审计记录中。
 - SourceRecord、Observation、Snapshot、ResearchRun 和 audit event 均通过 SQLite trigger 禁止 `UPDATE/DELETE`；Calculation/Result 作为运行响应中的哈希化内容持久化，不另建空泛实体表。修订只追加新行。
 - 对 PIT 查询键和 knowledge time 建复合索引。
+- 修复版追加 `source_payloads` 保存原始导入对象及摘要，追加 `revision_links` 保存事后审核的 supersedes 关系、审核人、原因和时间；两表同样禁止 UPDATE/DELETE。旧事实行不被改写；缺原始导入证据时拒算，重导入原始 fixture 仅追加可验证证据。
+- PIT 比较使用固定微秒 UTC 查询键，兼容旧行的变长时间字符串；不依赖原始 TEXT 字典序。首个指标必须验证实际 Jan 1–Mar 31 / Jan 1–Jun 30 起止日期，不仅匹配 label。
 
 规模增长后可把事实快照迁到 Parquet，用 [DuckDB ASOF JOIN](https://duckdb.org/docs/current/guides/sql_features/asof_join) 做批量 PIT 连接；但金额除法仍留在 Decimal 执行器，因为 DuckDB 文档说明 [DECIMAL 除法会返回近似浮点](https://duckdb.org/docs/current/sql/data_types/numeric)。
 
@@ -486,7 +488,7 @@ timeout | cancelled | snapshot_not_found | replay_artifact_mismatch |
 source_unavailable | system_error
 ```
 
-CLI、MCP stdio 与未来 HTTP 使用同一映射表。one-shot 进程收到终止信号时回滚当前事务；若宿主直接强杀而无法返回 JSON，调用方按无响应 transport failure 处理。取消/超时不得提交 Result 或可发布 snapshot，只可追加不含权威值的运行事件。领域 `source_error/system_error` 只用于已进入分析后的单元格失败；请求级故障使用顶层 error。
+CLI、MCP stdio 与未来 HTTP 使用同一映射表。one-shot 进程收到终止信号时回滚当前事务；若宿主直接强杀而无法返回 JSON，调用方按无响应 transport failure 处理。取消/超时在最终事务 gate 前生效时不得提交 Result 或可发布 snapshot；gate 已通过后的取消不能撤销已提交运行，且客户端可能收不到响应。领域 `source_error/system_error` 只用于已进入分析后的单元格失败；请求级故障使用顶层 error。
 
 v1 固定上限：单请求一个实体、最多 16 个 targets、最多 8 次上游调用、默认 60 秒执行期限、序列化响应不超过 1 MiB。操作者可以调低，模型不能调高；超过上限返回结构化顶层错误且不提交部分结果。
 

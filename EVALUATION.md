@@ -4,7 +4,7 @@
 
 ## 结论
 
-v0.1 的本地插件纵向切片满足 `DESIGN.md` 第 13.3 节发布门槛。交付范围是：中国 A 股/CAS、合并口径 Q2 经营现金流单季同比、JSON/SQLite 本地存储、one-shot CLI、MCP stdio，以及仅限 loopback 的未认证 Streamable HTTP 测试入口。
+2026-09-05 审核发现旧测试集未覆盖小数秒 PIT、实际期间不符和跨入口取消等问题，因此撤回之前仅凭 23 项测试便认定满足全部发布门槛的表述。修复后的证据是下列有限黄金集与对抗集通过，不等价于所有金融数据或全部真实宿主已获生产验收。交付范围仍是：中国 A 股/CAS、合并口径 Q2 经营现金流单季同比、JSON/SQLite、本地 CLI/MCP，以及仅限 loopback 的未认证 Streamable HTTP。
 
 这不是生产金融数据服务。ChatGPT Web 公网部署、多人租户运营、Tushare 缓存/再分发许可、更多指标和真实宿主 UI 验收仍是明确的外部阶段，不计入 v0.1 已完成声明。
 
@@ -12,11 +12,11 @@ v0.1 的本地插件纵向切片满足 `DESIGN.md` 第 13.3 节发布门槛。�
 
 | 门槛 | 结果 | 自动化证据 |
 |---|---:|---|
-| PIT 泄漏为 0 | 通过 | 修订前后、`public/system` 分流、日精度同日边界、未来数据与歧义版本测试 |
+| 测试集 PIT 泄漏为 0 | 通过 | 修订前后、双 policy、日精度、小数秒双向边界、审核关系生效时间 |
 | Decimal 与期间转换 100% | 通过 | 四输入 Q2 累计转单季同比黄金结果；`ROUND_HALF_EVEN`、负分母、零分母、NaN 对抗测试 |
 | keyed 输出无额外/重复键 | 通过 | 单目标、多目标与部分拒算测试 |
 | `ok` 血缘完整率 100% | 通过 | explain 验证四个输入的 source/observation/hash/timestamp；tenant 隔离测试 |
-| 重放哈希一致率 100% | 通过 | replay 同时验证 request、formula、build、snapshot、observation 与 result hash |
+| 测试集重放哈希一致率 100% | 通过 | request/response、formula/build、manifest、原始 payload、observation 内容与 raw hash；内容故障注入拒绝重放 |
 | 缺必要期间不产生数值 | 通过 | 缺 Q1 fixture 返回结构化 `insufficient_data` |
 
 最终回归命令：
@@ -29,7 +29,20 @@ node --experimental-strip-types --check integrations/pi/fin-harness.ts
 uv build
 ```
 
-测试套件共 23 项，另包括：所有五张权威表的不可变 trigger、非法协议、checked-in JSON Schema、CLI 单行 framing、MCP discovery/metadata、真实 stdio 子进程、loopback HTTP 与 direct core 结果等价、宿主配置可解析且无 secret、Tushare 响应字段漂移 fail-closed，以及缺 token 时不联网的类型化失败。
+测试套件共 39 项，包含七张 append-only 表、非法协议/参数反例、checked-in Schema 与 MCP 发布契约一致性、CLI 单行 framing、stdio/loopback HTTP、Pi 薄 adapter→真实 CLI、Tushare 字段漂移和无 token 时不联网的类型化失败。
+
+### 审核修复回归
+
+- PIT 查询兼容旧库变长时间字符串，按固定微秒 UTC key 比较；实际 Q1/H1 起止日期必须精确匹配。
+- 自定义 registry 必须与唯一已审核定义一致，不会给固定计算伪造公式身份。
+- replay 从原始导入 payload 校验 observation 和 source 内容，并核对 request/response/snapshot 摘要。
+- 已入库版本通过 `link-revision` 追加审核关系；跨事实族、时间倒置、循环和冲突关系均拒绝；system 不在审核前应用后加的关系。
+- 取消或超时在 commit gate 前生效时，run/snapshot/audit 全部回滚；测试覆盖 MCP 线程取消、MCP deadline、CLI 未完成 stdin、事务尾部期限失败。
+- 同一超大 explain 在 CLI/MCP 都返回 `response_too_large`；CLI 非零退出并保留 request_id。Pi 保留合法的协议错误对象。
+- schema v1 旧库升级只追加表，不改写权威行；缺原始证据时拒算，重导入原始 fixture 后恢复；未知数据库版本不降级。
+- `uv build --offline` 与 `python tests/check_distribution.py` 验证 wheel/sdist 契约内容，以及仓库外 clean venv 的无依赖安装、schema 加载、analyze/replay。
+
+Ruff 检查命令：`uvx --offline ruff check src tests`。Pi 的 Node 检查使用宿主注册/Schema 构造器 stub，但执行真实 adapter 和 CLI；这不是完整 Pi runtime 验收。本轮未重新访问真实 Tushare 数据。
 
 ## 受控真实数据烟测
 
@@ -46,7 +59,7 @@ uv build
 | ChatGPT desktop / Codex | 已交付 stdio 配置样例并用真实 MCP 子进程验证 | 用户仍需复制配置并在自己的桌面会话做 UI 验收 |
 | OpenCode | 已交付 local MCP 配置样例 | 未在本机安装宿主 |
 | DeepSeek Harness | 已交付官方 MCP client 的配置补丁样例 | 未在本机安装宿主 |
-| Pi | 已交付两个工具的薄 TypeScript adapter，完成语法与静态契约检查 | 未在真实 Pi runtime 加载 |
+| Pi | 已交付薄 adapter，并验证真实 CLI 成功/错误、可选 signal、取消和 spawn failure | Schema 构造器/宿主注册使用 stub；未在完整 Pi runtime 加载 |
 | Mosaic | 已交付 controller 侧 capability materialization 接入说明 | 现有零参数 `tools.call` 不适合直接透传动态金融请求，需由 Mosaic 维护方接入 |
 | ChatGPT Web | 未交付，按条件推迟 | 需要公网 HTTPS、OAuth/tenant ACL、限流、稳定域名和数据许可 |
 

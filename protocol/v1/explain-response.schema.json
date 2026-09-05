@@ -12,6 +12,7 @@
     "status": {"enum": ["ok", "error"]},
     "results": {
       "type": "array",
+      "maxItems": 16,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -30,9 +31,14 @@
       "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "code": {"enum": ["permission_denied", "snapshot_not_found", "replay_artifact_mismatch", "invalid_request", "system_error"]},
+        "code": {"enum": ["permission_denied", "snapshot_not_found", "replay_artifact_mismatch", "invalid_request", "unsupported_protocol", "rate_limited", "timeout", "cancelled", "source_unavailable", "response_too_large", "system_error"]},
         "message": {"type": "string", "maxLength": 512}
       }
     }
-  }
+  },
+  "allOf": [{
+    "if": {"properties": {"status": {"const": "error"}}},
+    "then": {"required": ["error"], "properties": {"results": {"maxItems": 0}}},
+    "else": {"required": ["run_id"]}
+  }]
 }

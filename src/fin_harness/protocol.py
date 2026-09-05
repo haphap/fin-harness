@@ -4,8 +4,12 @@ import hashlib
 import json
 import math
 import re
+import sys
+import threading
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 PROTOCOL = "fin-harness/v1"
@@ -14,19 +18,6 @@ MAX_SOURCE_CALLS = 8
 MAX_RESPONSE_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 60
 METRIC_ID = "derived.cashflow.operating.single_quarter_yoy"
-
-RESULT_STATUSES = {
-    "ok",
-    "insufficient_data",
-    "ambiguous_entity",
-    "ambiguous_metric",
-    "ambiguous_source_version",
-    "unsupported_metric",
-    "not_applicable",
-    "validation_failed",
-    "source_error",
-    "system_error",
-}
 
 TOP_ERROR_CODES = {
     "invalid_request",
@@ -42,8 +33,9 @@ TOP_ERROR_CODES = {
     "system_error",
 }
 
-_PERIOD_RE = re.compile(r"^(\d{4})Q([1-4])$")
-_DECIMAL_RE = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?$")
+_PERIOD_RE = re.compile(r"^([0-9]{4})Q([1-4])$")
+_DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
+_TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$")
 
 
 class ProtocolError(ValueError):
@@ -57,11 +49,38 @@ class CancelledError(RuntimeError):
     pass
 
 
+class ExecutionControl:
+    """One request's deadline and cancellation, including the final commit gate."""
+
+    def __init__(self, timeout: float = DEFAULT_TIMEOUT_SECONDS):
+        if not 0 < timeout <= DEFAULT_TIMEOUT_SECONDS:
+            raise ValueError("timeout must be in (0, 60] seconds")
+        self.deadline = time.monotonic() + timeout
+        self._cancelled = threading.Event()
+        self._commit_lock = threading.Lock()
+
+    def cancel(self) -> None:
+        with self._commit_lock:
+            self._cancelled.set()
+
+    def check(self) -> None:
+        if self._cancelled.is_set():
+            raise CancelledError("operation cancelled")
+        if time.monotonic() >= self.deadline:
+            raise ProtocolError("timeout", "execution deadline exceeded")
+
+    def commit(self, connection: Any) -> None:
+        # Cancellation arriving after this gate belongs to an already committed run.
+        with self._commit_lock:
+            self.check()
+            connection.commit()
+
+
 def parse_timestamp(value: Any, field: str = "timestamp") -> datetime:
-    if not isinstance(value, str):
-        raise ProtocolError("invalid_request", f"{field} must be a string")
+    if not isinstance(value, str) or not _TIMESTAMP_RE.fullmatch(value):
+        raise ProtocolError("invalid_request", f"{field} must be RFC 3339 with at most six fractional digits")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.upper().replace("Z", "+00:00"))
     except ValueError as exc:
         raise ProtocolError("invalid_request", f"{field} must be ISO 8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -71,6 +90,33 @@ def parse_timestamp(value: Any, field: str = "timestamp") -> datetime:
 
 def normalize_timestamp(value: Any, field: str = "timestamp") -> str:
     return parse_timestamp(value, field).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def timestamp_key(value: str) -> str:
+    """Comparable UTC key, also for legacy variable-width timestamp rows."""
+    return parse_timestamp(value).astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def load_schema(name: str) -> dict[str, Any]:
+    for directory in (Path(__file__).resolve().parents[2] / "protocol/v1",
+                      Path(sys.prefix) / "share/fin-harness/protocol/v1"):
+        path = directory / f"{name}.schema.json"
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+    raise FileNotFoundError(f"protocol schema {name} was not installed")
+
+
+def check_response_size(value: Any) -> None:
+    if len(canonical_json(value).encode("utf-8")) > MAX_RESPONSE_BYTES:
+        raise ProtocolError("response_too_large", "response exceeds 1 MiB")
+
+
+def exception_response(request_id: str | None, exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, ProtocolError):
+        return error_response(request_id, exc.code, exc.message)
+    if isinstance(exc, CancelledError):
+        return error_response(request_id, "cancelled", "operation cancelled")
+    return error_response(request_id, "system_error", "internal system error")
 
 
 def require_decimal_string(value: Any, field: str = "value") -> Decimal:
@@ -146,13 +192,13 @@ def validate_envelope(value: Any) -> dict[str, Any]:
     )
     if value["protocol"] != PROTOCOL:
         raise ProtocolError("unsupported_protocol", f"only {PROTOCOL} is supported")
-    if value["operation"] not in {"analyze", "explain"}:
+    if value["operation"] not in ("analyze", "explain"):
         raise ProtocolError("invalid_request", "operation must be analyze or explain")
     request_id = value["request_id"]
     if request_id is not None and (not isinstance(request_id, str) or not 1 <= len(request_id) <= 128):
         raise ProtocolError("invalid_request", "request_id must be null or a 1..128 character string")
     context = value.get("context")
-    if context is not None:
+    if "context" in value:
         if not isinstance(context, dict):
             raise ProtocolError("invalid_request", "context must be an object")
         _exact_keys(context, {"client", "correlation_id"}, set(), "context")
@@ -185,18 +231,18 @@ def _validate_analyze(request: Any) -> None:
         if not isinstance(target, dict):
             raise ProtocolError("invalid_request", f"targets[{index}] must be an object")
         _exact_keys(target, {"metric_id", "period", "scope"}, {"metric_id", "period", "scope"}, f"targets[{index}]")
-        if not isinstance(target["metric_id"], str) or not target["metric_id"]:
+        if not isinstance(target["metric_id"], str) or not 1 <= len(target["metric_id"]) <= 128:
             raise ProtocolError("invalid_request", f"targets[{index}].metric_id is invalid")
         if not isinstance(target["period"], str) or not _PERIOD_RE.fullmatch(target["period"]):
             raise ProtocolError("invalid_request", f"targets[{index}].period must look like 2026Q2")
-        if target["scope"] not in {"consolidated", "parent"}:
+        if target["scope"] not in ("consolidated", "parent"):
             raise ProtocolError("invalid_request", f"targets[{index}].scope is invalid")
         fingerprint = canonical_json(target)
         if fingerprint in seen:
             raise ProtocolError("invalid_request", "targets must be unique")
         seen.add(fingerprint)
     parse_timestamp(request["as_of"], "as_of")
-    if request["knowledge_policy"] not in {"system", "public"}:
+    if request["knowledge_policy"] not in ("system", "public"):
         raise ProtocolError("invalid_request", "knowledge_policy must be system or public")
 
 
@@ -207,10 +253,10 @@ def _validate_explain(request: Any) -> None:
     if not isinstance(request["run_id"], str) or not 1 <= len(request["run_id"]) <= 128:
         raise ProtocolError("invalid_request", "run_id is invalid")
     result_ids = request.get("result_ids")
-    if result_ids is not None:
+    if "result_ids" in request:
         if not isinstance(result_ids, list) or not 1 <= len(result_ids) <= MAX_TARGETS:
             raise ProtocolError("invalid_request", f"result_ids must contain 1..{MAX_TARGETS} entries")
-        if len(set(result_ids)) != len(result_ids) or any(not isinstance(item, str) or not item for item in result_ids):
+        if any(not isinstance(item, str) or not 1 <= len(item) <= 128 for item in result_ids) or len(set(result_ids)) != len(result_ids):
             raise ProtocolError("invalid_request", "result_ids must be unique non-empty strings")
 
 

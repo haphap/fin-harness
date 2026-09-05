@@ -1,0 +1,5 @@
+include DESIGN.md PROTOCOL.md EVALUATION.md uv.lock
+recursive-include protocol *.json
+recursive-include tests *.py *.json *.mjs
+recursive-include examples *.json *.jsonc *.toml *.yml
+recursive-include integrations *.ts *.md

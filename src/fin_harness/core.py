@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .protocol import METRIC_ID, PROTOCOL, decimal_string, normalize_timestamp, require_decimal_string, sha256_json
+from .protocol import (METRIC_ID, PROTOCOL, ExecutionControl, ProtocolError, check_response_size,
+                       decimal_string, error_response, exception_response, normalize_timestamp,
+                       require_decimal_string, sha256_json, validate_envelope)
 from .store import AmbiguousSourceVersion, Store
 
 _ROLE_TRANSFORMS = {
@@ -22,19 +24,37 @@ _ROLE_TRANSFORMS = {
 
 
 class Engine:
-    def __init__(self, store: Store, metric_path: str | Path | None = None):
+    def __init__(self, store: Store, metric_path: str | Path | None = None, control: ExecutionControl | None = None):
         self.store = store
+        self.control = control
         self.metric_path = Path(metric_path) if metric_path else _default_metric_path()
         self.metric = json.loads(self.metric_path.read_text(encoding="utf-8"))
         self.formula_hash = sha256_json(self.metric)
+        # One audited definition, not an executable configuration language.
+        if self.formula_hash != "sha256:2c164cbe330c93d71c76b85c9f92e686cba7b508ff1e0039b8836b42af4b5fc9":
+            raise ProtocolError("replay_artifact_mismatch", "metric registry is not the audited v1 definition")
         self.build_digest = _build_digest(self.formula_hash)
 
     def handle(self, envelope: dict[str, Any], tenant: str = "local") -> dict[str, Any]:
-        if envelope["operation"] == "analyze":
-            return self.analyze(envelope, tenant)
-        return self.explain(envelope, tenant)
+        request_id = envelope.get("request_id") if isinstance(envelope, dict) else None
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+            request_id = None
+        try:
+            validate_envelope(envelope)
+            self._check()
+            response = self.analyze(envelope, tenant) if envelope["operation"] == "analyze" else self.explain(envelope, tenant)
+            check_response_size(response)
+            return response
+        except Exception as exc:
+            return exception_response(request_id, exc)
+
+    def _check(self) -> None:
+        if self.control is not None:
+            self.control.check()
 
     def analyze(self, envelope: dict[str, Any], tenant: str = "local") -> dict[str, Any]:
+        control = self.control or ExecutionControl()
+        control.check()
         request = envelope["request"]
         request_id = envelope["request_id"]
         as_of = normalize_timestamp(request["as_of"], "as_of")
@@ -45,6 +65,7 @@ class Engine:
         results: list[dict[str, Any]] = []
 
         for target in request["targets"]:
+            control.check()
             if entity_id is None:
                 results.append(self._rejected_result(target, request, "ambiguous_entity", "entity alias is not uniquely resolved"))
                 continue
@@ -76,6 +97,7 @@ class Engine:
             "results": results,
         }
         result_hash = sha256_json({"status": status, "results": results})
+        check_response_size(response)
         run = {
             "run_id": run_id,
             "tenant": tenant,
@@ -101,6 +123,7 @@ class Engine:
                     "created_at": created_at,
                 }
             ],
+            control=control,
         )
         return response
 
@@ -153,6 +176,18 @@ class Engine:
                 entity_id,
             ), None
 
+        for role, item in observations.items():
+            input_year = year - 1 if role.startswith("prior_") else year
+            expected_end = f"{input_year}-03-31" if role.endswith("q1") else f"{input_year}-06-30"
+            if item["period_start"] != f"{input_year}-01-01" or item["period_end"] != expected_end:
+                return self._rejected_result(target, {"as_of": request_as_of, "knowledge_policy": knowledge_policy},
+                    "validation_failed", "input does not match the exact Q1/H1 calendar period", entity_id), None
+            try:
+                self.store.verify_observation(item)
+            except ValueError as exc:
+                return self._rejected_result(target, {"as_of": request_as_of, "knowledge_policy": knowledge_policy},
+                    "validation_failed", str(exc), entity_id), None
+
         units = {item["unit"] for item in observations.values()}
         currencies = {item["currency"] for item in observations.values()}
         scopes = {item["scope"] for item in observations.values()}
@@ -175,6 +210,7 @@ class Engine:
                     "source_record_id": item["source_record_id"],
                     "normalized_hash": item["normalized_hash"],
                     "raw_hash": item["raw_hash"],
+                    "payload_hash": item["payload_hash"],
                     "published_at": item["published_at"],
                     "ingested_at": item["ingested_at"],
                     "value": item["value_text"],
@@ -239,7 +275,7 @@ class Engine:
             "snapshot_id": snapshot_id,
             "validation": {
                 "status": "passed",
-                "check_ids": ["pit", "same_scope", "same_currency", "same_unit", "nonzero_denominator"],
+                "check_ids": ["pit", "exact_periods", "source_integrity", "same_scope", "same_currency", "same_unit", "nonzero_denominator"],
             },
             "provenance": {
                 "calculation_id": "calc_" + result_id.removeprefix("result_"),
@@ -274,26 +310,30 @@ class Engine:
         }
 
     def explain(self, envelope: dict[str, Any], tenant: str = "local") -> dict[str, Any]:
+        control = self.control or ExecutionControl()
         requested_run_id = envelope["request"]["run_id"]
         run = self.store.get_run(requested_run_id, tenant)
         if run is None:
-            return _explain_error(envelope["request_id"], "snapshot_not_found", "run was not found for this tenant")
+            return error_response(envelope["request_id"], "snapshot_not_found", "run was not found for this tenant")
+        if not self._run_intact(run):
+            return error_response(envelope["request_id"], "replay_artifact_mismatch", "run content hash mismatch")
         if run["formula_hash"] != self.formula_hash or run["build_digest"] != self.build_digest:
-            return _explain_error(envelope["request_id"], "replay_artifact_mismatch", "current artifacts do not match the recorded run")
+            return error_response(envelope["request_id"], "replay_artifact_mismatch", "current artifacts do not match the recorded run")
         wanted = set(envelope["request"].get("result_ids", []))
         explanations = []
         for result in run["response"]["results"]:
+            control.check()
             if wanted and result["result_id"] not in wanted:
                 continue
             if result["status"] != "ok":
                 continue
             snapshot = self.store.get_snapshot(result["snapshot_id"], tenant)
             if snapshot is None:
-                return _explain_error(envelope["request_id"], "snapshot_not_found", "snapshot was not found for this tenant")
+                return error_response(envelope["request_id"], "snapshot_not_found", "snapshot was not found for this tenant")
             try:
                 calculation, inputs = self._recompute(snapshot)
             except ValueError as exc:
-                return _explain_error(envelope["request_id"], "replay_artifact_mismatch", str(exc))
+                return error_response(envelope["request_id"], "replay_artifact_mismatch", str(exc))
             explanations.append(
                 {
                     "result_id": result["result_id"],
@@ -317,13 +357,17 @@ class Engine:
         }
 
     def replay(self, run_id: str, tenant: str = "local") -> dict[str, Any]:
+        control = self.control or ExecutionControl()
         run = self.store.get_run(run_id, tenant)
         if run is None:
             return {"status": "error", "error": {"code": "snapshot_not_found", "message": "run was not found for this tenant"}}
+        if not self._run_intact(run):
+            return {"status": "error", "error": {"code": "replay_artifact_mismatch", "message": "run content hash mismatch"}}
         if run["formula_hash"] != self.formula_hash or run["build_digest"] != self.build_digest:
             return {"status": "error", "error": {"code": "replay_artifact_mismatch", "message": "current artifacts do not match the recorded run"}}
         replayed = []
         for result in run["response"]["results"]:
+            control.check()
             if result["status"] != "ok":
                 replayed.append(result)
                 continue
@@ -347,6 +391,12 @@ class Engine:
             "replay_result_hash": replay_hash,
         }
 
+    @staticmethod
+    def _run_intact(run: dict[str, Any]) -> bool:
+        return (sha256_json(run["request"]) == run["request_hash"]
+                and sha256_json({"status": run["response"]["status"], "results": run["response"]["results"]}) == run["result_hash"]
+                and run["status"] == run["response"]["status"])
+
     def _recompute(self, snapshot: dict[str, Any]) -> tuple[dict[str, str], list[dict[str, Any]]]:
         if sha256_json(snapshot["manifest"]) != snapshot["manifest_hash"]:
             raise ValueError("snapshot manifest hash mismatch")
@@ -356,6 +406,9 @@ class Engine:
             observation = self.store.get_observation(saved["observation_id"])
             if observation is None or observation["normalized_hash"] != saved["normalized_hash"]:
                 raise ValueError("snapshot observation hash mismatch")
+            self.store.verify_observation(observation)
+            if observation["raw_hash"] != saved["raw_hash"] or observation["payload_hash"] != saved.get("payload_hash"):
+                raise ValueError("snapshot source hash mismatch")
             values[saved["role"]] = observation["value_text"]
             inputs.append(
                 {
@@ -408,16 +461,6 @@ def _percentage(value: str) -> str:
 def _time_precision(observations: Any) -> str:
     values = {item["source_time_precision"] for item in observations}
     return values.pop() if len(values) == 1 else "mixed"
-
-
-def _explain_error(request_id: str | None, code: str, message: str) -> dict[str, Any]:
-    return {
-        "protocol": PROTOCOL,
-        "request_id": request_id,
-        "status": "error",
-        "results": [],
-        "error": {"code": code, "message": message[:512]},
-    }
 
 
 def _default_metric_path() -> Path:
